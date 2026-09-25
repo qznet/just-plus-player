@@ -195,11 +195,11 @@ final class SpeedPanel {
             apply.run();
         });
         final Runnable slower = () -> {
-            speed[0] = snap(Math.max(MIN, speed[0] - STEP));
+            speed[0] = nudge(speed[0], -STEP);
             apply.run();
         };
         final Runnable faster = () -> {
-            speed[0] = snap(Math.min(MAX, speed[0] + STEP));
+            speed[0] = nudge(speed[0], STEP);
             apply.run();
         };
         minus.setOnClickListener(v -> slower.run());
@@ -273,6 +273,15 @@ final class SpeedPanel {
     /** To the nearest step, so a rate arriving from elsewhere lands on the same grid the ± walks. */
     private static float snap(final float speed) {
         return Math.round(Math.min(MAX, Math.max(MIN, speed)) / STEP) * STEP;
+    }
+
+    /**
+     * One press of a ± , of a key stepping the same rate, of anything that moves it by a step. Held to
+     * the range here rather than at the call site so every way of asking for a faster rate ends at the
+     * same ceiling, and landed on the grid so an exact rate from elsewhere walks by even steps.
+     */
+    static float nudge(final float speed, final float step) {
+        return snap(Math.min(MAX, Math.max(MIN, speed + step)));
     }
 
     private static MaterialButton iconButton(final Context ctx, final UiMetrics ui, final int icon,

@@ -367,6 +367,9 @@
     <string name="speed_refused_tunneling">Speed stays normal while playback is tunnelled: the decoding hardware keeps its own pace. Turn tunnelled playback off to use speed</string>
     <string name="speed_slower">Slower</string>
     <string name="speed_faster">Faster</string>
+    <string name="pref_fullscreen_speed_keys">Arrow keys in full screen</string>
+    <string name="pref_fullscreen_speed_keys_on">Up and down step the playback rate by 0.1</string>
+    <string name="pref_fullscreen_speed_keys_off">Up and down raise the playback controls</string>
     <string name="audio_track_number">Track %1$d</string>
     <string name="notice_track_unsupported">no decoder on this device</string>
     <string name="notice_track_unsupported_hint">This device has no decoder for that track — the others still play</string>

@@ -4,6 +4,13 @@ on:
   push:
     tags:
       - 'v*'
+    branches:
+      - master
+  # So a fork's owner can build their own copy without a tag: the release job below only runs on the
+  # public repository, and the push trigger above only fires on one. A debug build needs no secrets,
+  # which is also why it runs everywhere this workflow does - on a fork the keystore and the Sentry
+  # key are unreadable, and a job that asked for them could not be triggered from there at all.
+  workflow_dispatch:
 
 jobs:
   build:
@@ -61,3 +68,30 @@ jobs:
             JustPlus.Player.apk
           prerelease: true
           draft: true
+
+  # The other half of this workflow, and the only half a fork can run. The job above needs a tag and
+  # the public repository's secrets, and publishes what it builds; this one builds an unsigned debug
+  # APK of master, and keeps every ABI so a single artifact installs on the television that will be
+  # used to read a Dolby Vision state line back. No secrets, so it is the only job that runs on a
+  # fork, where the keystore and the Sentry key are unreadable to begin with.
+  debug:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+
+      # Not assembleLatestUniversalRelease: the release type drops the two Intel ABIs, and the point
+      # of this build is to be installable wherever the fault is being read back from.
+      - run: ./gradlew assembleLatestUniversalDebug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: JustPlus.Player.debug
+          path: app/build/outputs/apk/latestUniversal/debug/*.apk

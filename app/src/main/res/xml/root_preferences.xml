@@ -744,6 +744,16 @@
                 app:summaryOff="@string/pref_map_dv7_off"
                 app:title="@string/pref_map_dv7" />
 
+            <!-- Next to the decoding switches on purpose: what the arrows do is a matter of what the
+                 remote is for, and it is the only thing in the player a television can reach without
+                 opening a panel. -->
+            <SwitchPreferenceCompat
+                app:key="fullscreenSpeedKeys"
+                app:defaultValue="true"
+                app:summaryOn="@string/pref_fullscreen_speed_keys_on"
+                app:summaryOff="@string/pref_fullscreen_speed_keys_off"
+                app:title="@string/pref_fullscreen_speed_keys" />
+
         <PreferenceCategory
             app:key="privacyCategory"
             app:title="@string/pref_privacy_header">

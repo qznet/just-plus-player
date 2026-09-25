@@ -59,6 +59,7 @@ class Prefs {
     private static final String PREF_KEY_RESTORE_AUTO_ROTATE = "restoreAutoRotate";
     private static final String PREF_KEY_AUTO_PIP = "autoPiP";
     private static final String PREF_KEY_DISABLE_VOLUME_BRIGHTNESS_GESTURES = "disableVolumeBrightnessGestures";
+    private static final String PREF_KEY_FULLSCREEN_SPEED_KEYS = "fullscreenSpeedKeys";
     private static final String PREF_KEY_HOLD_SPEED = "holdSpeed";
     /** Settings-screen appearance. The player and the error screen are dark by design, so these two
      *  reach only the settings window. */
@@ -216,6 +217,11 @@ class Prefs {
     // the screen says nothing about how a 4:3 recording should sit. See aspectClassOf.
     public int aspectClass = -1;
     public float speed = 1.f;
+    // What the two free arrow keys do while the controls are hidden: step the playback rate by 0.1, or
+    // raise the controls as they always have. On a television the arrows are the only way at a rate
+    // that is not a menu, and the reason the controls went away is that the remote reached them by
+    // hand; off is for a viewer who wants the arrow keys to mean nothing but navigation.
+    public boolean fullscreenSpeedKeys = true;
 
     public String subtitleTrackId;
     public String audioTrackId;
@@ -470,6 +476,7 @@ class Prefs {
         autoPiP = mSharedPreferences.getBoolean(PREF_KEY_AUTO_PIP, autoPiP);
         disableVolumeBrightnessGestures = mSharedPreferences.getBoolean(
                 PREF_KEY_DISABLE_VOLUME_BRIGHTNESS_GESTURES, disableVolumeBrightnessGestures);
+        fullscreenSpeedKeys = mSharedPreferences.getBoolean(PREF_KEY_FULLSCREEN_SPEED_KEYS, fullscreenSpeedKeys);
         holdSpeedMode = getHoldSpeedMode(mContext);
         tunneling = mSharedPreferences.getBoolean(PREF_KEY_TUNNELING, tunneling);
         frameRateMatching = mSharedPreferences.getBoolean(PREF_KEY_FRAMERATE_MATCHING, frameRateMatching);

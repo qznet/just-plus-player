@@ -971,6 +971,12 @@ public class PlayerActivity extends Activity {
     private int keyScrubSteps;          // presses in a row, one way (drives the step size)
     private boolean keyScrubForward;    // direction of the last press; a reversal restarts the ladder
     private long keyScrubLastMs;
+    // Speed stepped by a key while the controls are down. A rate is heard rather than read, so a press
+    // announces the new one on the picture, and a hold walks it — at one step per interval, because a
+    // D-pad repeats about 57 ms, which is far quicker than a rate can be judged by.
+    private static final float SPEED_KEY_STEP = 0.1f;
+    private static final long SPEED_KEY_STEP_MS = 140;
+    private long speedKeyStepLastMs;
     // A held key repeats at the platform's rate, about 57 ms measured on a Shield, which is far faster
     // than a step can be aimed at. One step per floor makes a hold the same speed on any box and any
     // remote; clicks arrive further apart than this and are untouched.
@@ -3511,6 +3517,10 @@ public class PlayerActivity extends Activity {
                     // Repeats are swallowed below: a held key would re-show what the first press dismissed.
                     if (event.getRepeatCount() == 0)
                         playerView.hideController();
+                } else if (mPrefs.fullscreenSpeedKeys && stepSpeedByKey(true)) {
+                    // Out of the controls, up steps the rate up. The press that did not move it falls
+                    // through to raising the controls below, so turning the keys off leaves a remote
+                    // with the old behaviour rather than with no way to see the player.
                 } else if (event.getRepeatCount() == 0) {
                     playerView.showController();
                 }
@@ -3524,6 +3534,9 @@ public class PlayerActivity extends Activity {
                         break;
                     if (event.getRepeatCount() == 0)
                         playerView.hideController();
+                } else if (mPrefs.fullscreenSpeedKeys && stepSpeedByKey(false)) {
+                    // The mirror of the branch above, and for the same reason: the rate is what these
+                    // two keys now do while the picture is on its own.
                 } else if (event.getRepeatCount() == 0) {
                     // Down opens the controls straight on the time bar, saving the press it takes to get
                     // there from play/pause; Up still lands on play/pause. See the visibility listener.
@@ -10027,6 +10040,55 @@ public class PlayerActivity extends Activity {
         }
         speedRequested = speed;
         player.setPlaybackSpeed(speed);
+    }
+
+    /**
+     * One press of a key stepping the rate, up or down, while the controls are out of the way.
+     *
+     * <p>The whole point of doing this with the controls hidden is that it is the only control a
+     * remote can reach without a menu: a television has two free arrow keys and a rate that is
+     * otherwise a couple of presses into a panel. So the rate moves and the picture says what it
+     * became — nothing here raises the controls, because raising them is what the viewer stepped out
+     * of to get at the rate.
+     *
+     * <p>Ranges and the grid come from {@link SpeedPanel}, the same ones its own ± walk, so a rate
+     * set by a key and by a press of the panel are the same rates. A room owns the rate while it is
+     * closing a drift, and stepping against it there would only be undone a quarter of a second
+     * later, so a joined room keeps the rate alone.
+     *
+     * @return whether the rate actually moved. Also the answer a held key gets at the end of the
+     *     range, which is why the caller can throttle on it rather than on its own clock: a press
+     *     that changes nothing must not wait out an interval for a step that will not arrive.
+     */
+    private boolean stepSpeedBy(float step) {
+        if (player == null || !haveMedia || (together != null && together.isActive())) {
+            return false;
+        }
+        final float current = userSpeed();
+        final float stepped = SpeedPanel.nudge(current, step);
+        if (Math.abs(stepped - current) < 0.0001f) {
+            return false;
+        }
+        // Through applySpeed rather than requestSpeed, so the choice is what the picker would have
+        // remembered and what the "back to normal" affordance compares against on the way out.
+        applySpeed(stepped);
+        Dialogs.showText(playerView, SpeedPanel.format(stepped),
+                step > 0 ? R.drawable.ic_fast_forward_24dp : R.drawable.ic_rewind_24dp, 1200);
+        return true;
+    }
+
+    /**
+     * A press of either arrow with the controls hidden, which steps the rate unless the viewer turned
+     * the keys off. Throttling lives here rather than in stepSpeedBy so that the first press of a hold
+     * is not held up behind an interval: the press that takes 1× to 1.1× has to land on arrival.
+     */
+    private boolean stepSpeedByKey(boolean faster) {
+        final long now = SystemClock.uptimeMillis();
+        if (now - speedKeyStepLastMs < SPEED_KEY_STEP_MS) {
+            return true;
+        }
+        speedKeyStepLastMs = now;
+        return stepSpeedBy(faster ? SPEED_KEY_STEP : -SPEED_KEY_STEP);
     }
 
     private void cycleOrientation() {
