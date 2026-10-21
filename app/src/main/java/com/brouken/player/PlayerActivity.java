@@ -363,6 +363,13 @@ public class PlayerActivity extends Activity {
     // down, so without this a viewer stepping through 1x pays for two rebuilds a second apart.
     private static final long AUDIO_MODE_MIN_INTERVAL_MS = 1200;
     private long audioModeSwitchMs;
+    // A reselect is a request, not a promise: the renderer re-asks the sink whether it takes the
+    // bitstream, and nothing tells this code whether it believed the answer. So the answer is checked
+    // afterwards, and a sink that is still bitstreaming a rate it cannot stretch is asked again. Two
+    // tries, because a third would only repeat whatever the first two ran into.
+    private static final long AUDIO_MODE_VERIFY_MS = 700;
+    private static final int MAX_AUDIO_MODE_RETRIES = 2;
+    private int audioModeRetries;
     // A playlist item that started mid-session still owes the display a mode of its own; spent as
     // soon as the item's own frame rate can be read. See matchDisplayModeForNewItem.
     private boolean modeMatchPending;
@@ -1068,6 +1075,8 @@ public class PlayerActivity extends Activity {
         audioModeSwitchMs = SystemClock.uptimeMillis();
         reselectAudioTrackForMode();
     };
+    // The same appointment's second half: look at what the rebuild actually produced.
+    private final Runnable audioModeVerifyRunnable = this::verifyAudioMode;
     // Whether the current item has ever actually played. The first start of an item opens its own fresh
     // output, so there is nothing to re-lock — and recreating the track at that exact instant is what left
     // roughly one opening in three with no sound at all, twice. Spending the latch waits for a real second
@@ -10099,6 +10108,15 @@ public class PlayerActivity extends Activity {
         if (!audioSink.setForceDecode(!normal)) {
             return false;
         }
+        // The flag changed, but the sink's current configuration may already be the one this rate asks
+        // for, and then there is nothing to reconfigure: a PCM track (a stereo film, an AAC commentary)
+        // never bitstreams, and a file opened at 1x has not configured anything yet when the first step
+        // arrives. Both are answers the next configure will give on its own.
+        if (audioSink.isPassthrough() == normal) {
+            audioModePending = false;
+            return false;
+        }
+        audioModeRetries = 0;
         Utils.log("audio mode: " + (normal ? "pass-through" : "decoded") + " at " + speed
                 + " (playing=" + player.isPlaying() + ")");
         if (!player.isPlaying()) {
@@ -10141,6 +10159,60 @@ public class PlayerActivity extends Activity {
         playerView.removeCallbacks(audioModeReselectRunnable);
         playerView.postDelayed(audioModeReselectRunnable, Math.max(delayMs, 0));
         Utils.log("audio mode: reselect in " + delayMs + "ms");
+    }
+
+    /**
+     * Look at what a rebuild produced, a beat after it reported back.
+     *
+     * <p>A reselect only asks the renderer to configure the sink again; whether it then decodes or
+     * bitstreams is the renderer's own decision, taken from the answer the sink gives at that moment.
+     * When the answer is ignored — a decoder that cannot be released, a route that claims the bitstream
+     * anyway — the viewer is left with a rate the audio cannot follow, which sounds like a film that is
+     * slightly out of step rather than like an error. So the state is checked, and asked again.
+     *
+     * <p>A select that never reported back is also cleared here: its latch refuses every later reselect,
+     * so leaving it set would quietly disable the whole feature for the rest of the session.
+     */
+    private void verifyAudioMode() {
+        if (player == null || audioSink == null || !haveMedia) {
+            return;
+        }
+        if (audioRestartInFlight) {
+            Utils.log("audio mode: reselect never reported, releasing it");
+            audioRestartInFlight = false;
+            if (!player.getCurrentTracks().isTypeSelected(C.TRACK_TYPE_AUDIO)) {
+                player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
+                        .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false).build());
+            }
+            scheduleAudioModeReselect(AUDIO_MODE_VERIFY_MS);
+            return;
+        }
+        final String mime = selectedMime(player.getCurrentTracks(), C.TRACK_TYPE_AUDIO);
+        if (MimeTypes.AUDIO_RAW.equals(mime) || "none".equals(mime)) {
+            // Nothing here is a bitstream, so there is no mode to be in: a PCM track decodes whatever
+            // the rate is and whatever the settings say.
+            return;
+        }
+        final float speed = speedRequested;
+        final boolean wantDecode = Math.abs(speed - 1f) > 0.005f;
+        final boolean bitstreaming = audioSink.isPassthrough();
+        if (bitstreaming != wantDecode) {
+            return;
+        }
+        if (!player.isPlaying()) {
+            return;
+        }
+        if (audioModeRetries >= MAX_AUDIO_MODE_RETRIES) {
+            Utils.log("audio mode: still bitstreaming at " + speed + " after "
+                    + audioModeRetries + " retries, leaving it");
+            return;
+        }
+        audioModeRetries++;
+        Utils.log("audio mode: still bitstreaming at " + speed + ", retry " + audioModeRetries);
+        audioModePending = true;
+        audioModePendingSpeed = speed;
+        audioModeSwitchMs = SystemClock.uptimeMillis();
+        reselectAudioTrackForMode();
     }
 
     /**
@@ -12057,6 +12129,11 @@ public class PlayerActivity extends Activity {
                 // rather than from applyBoost — this is a preference, not a gesture, and a changed
                 // preference rebuilds the player.
                 final int routeChannels = AudioCapabilities.getCapabilities(context).getMaxChannelCount();
+                // Worth a line of its own: a route that carries two channels is what turns a decoded
+                // 5.1 track into stereo, and that is a fact about the wire, not about the file.
+                Utils.log("audio sink: route channels=" + routeChannels
+                        + " passthrough=" + mPrefs.audioPassthrough
+                        + " speed=" + mPrefs.speed);
                 boostProcessor.setCentreBoost(mPrefs.centreBoost, routeChannels);
                 final boolean forceCapabilities = mPrefs.audioPassthrough && mPrefs.audioPassthroughForce;
                 // Declared capabilities are only honoured by a builder holding no context: given one,
@@ -13487,6 +13564,10 @@ public class PlayerActivity extends Activity {
                         audioModePending = false;
                         Utils.log("audio mode: rate " + audioModePendingSpeed + " after reselect");
                         player.setPlaybackSpeed(audioModePendingSpeed);
+                    }
+                    if (playerView != null) {
+                        playerView.removeCallbacks(audioModeVerifyRunnable);
+                        playerView.postDelayed(audioModeVerifyRunnable, AUDIO_MODE_VERIFY_MS);
                     }
                 }
                 return;
