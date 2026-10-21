@@ -284,6 +284,17 @@
                 app:summaryOff="@string/pref_passthrough_normal_speed_off"
                 app:title="@string/pref_passthrough_normal_speed" />
 
+            <!-- Beside it, because the decoded track it produces is where this question comes from:
+                 a route that carries two channels folds a surround mix itself, without headroom, and
+                 that is the crackle. Not depending on the switch above — a viewer who turns
+                 pass-through off entirely still gets surround decoded, and still wants the fold. -->
+            <SwitchPreferenceCompat
+                app:key="downmixNarrowRoute"
+                app:defaultValue="true"
+                app:summaryOn="@string/pref_downmix_narrow_route_on"
+                app:summaryOff="@string/pref_downmix_narrow_route_off"
+                app:title="@string/pref_downmix_narrow_route" />
+
             <SwitchPreferenceCompat
                 app:key="dynamicRange"
                 app:defaultValue="false"

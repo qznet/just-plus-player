@@ -44,6 +44,7 @@ import android.graphics.drawable.LayerDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.graphics.drawable.Icon;
 import android.hardware.display.DisplayManager;
+import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
 import android.media.MediaCodecList;
 import android.media.audiofx.AudioEffect;
@@ -12129,11 +12130,22 @@ public class PlayerActivity extends Activity {
                 // rather than from applyBoost — this is a preference, not a gesture, and a changed
                 // preference rebuilds the player.
                 final int routeChannels = AudioCapabilities.getCapabilities(context).getMaxChannelCount();
+                // What the decoded path can carry, which is a narrower question than the one above and
+                // the one the fold turns on. See pcmChannelsOfRoute.
+                final int routePcmChannels = pcmChannelsOfRoute(context);
                 // Worth a line of its own: a route that carries two channels is what turns a decoded
                 // 5.1 track into stereo, and that is a fact about the wire, not about the file.
                 Utils.log("audio sink: route channels=" + routeChannels
+                        + " pcm channels=" + routePcmChannels
                         + " passthrough=" + mPrefs.audioPassthrough
                         + " speed=" + mPrefs.speed);
+                // Ahead of the boost, because a fold this app does itself leaves the boost nothing to
+                // lift: the centre is already summed into the pair by the time it arrives. See
+                // DownmixAudioProcessor for why the fold is not left to the route. Always in the chain
+                // — it configures itself out of it when there is nothing to fold, and the chain is
+                // fixed once the sink exists, so a track that needs it later must not find it absent.
+                final DownmixAudioProcessor downmix =
+                        new DownmixAudioProcessor(mPrefs.downmixNarrowRoute, routePcmChannels);
                 boostProcessor.setCentreBoost(mPrefs.centreBoost, routeChannels);
                 final boolean forceCapabilities = mPrefs.audioPassthrough && mPrefs.audioPassthroughForce;
                 // Declared capabilities are only honoured by a builder holding no context: given one,
@@ -12161,11 +12173,12 @@ public class PlayerActivity extends Activity {
                         // passed here, and the system's own loudness effect sits past the sink
                         // altogether. A route of two channels is a television's own speakers or a
                         // phone's, and the heavy shape belongs there; the gentle one goes where there
-                        // are speakers worth keeping a mix for.
+                        // are speakers worth keeping a mix for. The fold comes first of all, so both
+                        // of them see the two channels that will actually leave the box.
                         .setAudioProcessors(mPrefs.dynamicRange
-                                ? new AudioProcessor[]{boostProcessor,
+                                ? new AudioProcessor[]{downmix, boostProcessor,
                                         new DynamicRangeProcessor(routeChannels <= 2)}
-                                : new AudioProcessor[]{boostProcessor});
+                                : new AudioProcessor[]{downmix, boostProcessor});
                 AudioSink sink = builder.build();
                 // The mode this session opens in, decided here rather than by a reselect on the first
                 // frame: a remembered rate other than 1x means there is no bitstream to hand over, and
@@ -15171,6 +15184,72 @@ public class PlayerActivity extends Activity {
      * and a track whose channel count is unknown — or an E-AC3 JOC one — has its ceiling decided
      * by the platform again, since media3 asks AudioTrack directly when the masks are missing.
      */
+    /**
+     * How many channels of PCM the route out of this box can actually carry, for deciding whether a
+     * decoded surround track has to be folded here.
+     *
+     * <p>Deliberately not {@link AudioCapabilities#getMaxChannelCount()}: that answers a different
+     * question — the widest thing the route can be handed at all — and on a television it answers ten
+     * for the PCM probe alone, because the platform defaults to ten when no HDMI plug broadcast ever
+     * arrives. A television is the source of that HDMI link, so the broadcast, which reports what the
+     * sink will take, never comes. A route that answers ten there is a route that carries two.
+     *
+     * <p>So the outputs are asked directly. Every sink that offers PCM reports the channel counts it
+     * offers it in, and the widest of those is the real width of the decoded path; a receiver behind
+     * ARC that offers only bitstreams contributes nothing, which is exactly right, since it folds
+     * whatever PCM reaches it. Zero means there was no PCM output to ask, and then nothing is assumed.
+     */
+    @SuppressLint("InlinedApi")
+    private static int pcmChannelsOfRoute(Context context) {
+        if (Build.VERSION.SDK_INT < 23) {
+            return 0;
+        }
+        final AudioManager audioManager =
+                (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+        if (audioManager == null) {
+            return 0;
+        }
+        int widest = 0;
+        boolean hdmiPresent = false;
+        int hdmiPcm = 0;
+        for (final AudioDeviceInfo device : audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
+            if (!device.isSink()) {
+                continue;
+            }
+            final int type = device.getType();
+            final boolean hdmi = type == AudioDeviceInfo.TYPE_HDMI
+                    || type == AudioDeviceInfo.TYPE_HDMI_ARC
+                    || (Build.VERSION.SDK_INT >= 31 && type == AudioDeviceInfo.TYPE_HDMI_EARC);
+            if (hdmi) {
+                hdmiPresent = true;
+            }
+            boolean pcm = false;
+            for (int encoding : device.getEncodings()) {
+                if (encoding == android.media.AudioFormat.ENCODING_PCM_16BIT
+                        || encoding == android.media.AudioFormat.ENCODING_PCM_FLOAT) {
+                    pcm = true;
+                    break;
+                }
+            }
+            if (!pcm) {
+                continue;
+            }
+            for (int channels : device.getChannelCounts()) {
+                widest = Math.max(widest, channels);
+                if (hdmi) {
+                    hdmiPcm = Math.max(hdmiPcm, channels);
+                }
+            }
+        }
+        if (hdmiPresent) {
+            // The HDMI link is where a television sends decoded audio, so its answer beats the
+            // loudspeakers' — and a receiver behind ARC that offers no PCM at all has already given
+            // the answer this is looking for: two channels, folded by the platform on the way out.
+            return hdmiPcm > 0 ? hdmiPcm : 2;
+        }
+        return widest;
+    }
+
     private static AudioCapabilities forcedAudioCapabilities(Context context) {
         final AudioCapabilities routeCaps = AudioCapabilities.getCapabilities(context);
         final Set<Integer> encodings = new LinkedHashSet<>();

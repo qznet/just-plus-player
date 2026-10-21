@@ -90,6 +90,7 @@ class Prefs {
     private static final String PREF_KEY_AUDIO_PASSTHROUGH_SYNC_MS = "audioPassthroughSyncMs";
     private static final String PREF_KEY_AUDIO_PASSTHROUGH_FORCE = "audioPassthroughForce";
     private static final String PREF_KEY_PASSTHROUGH_NORMAL_SPEED_ONLY = "passthroughNormalSpeedOnly";
+    private static final String PREF_KEY_DOWNMIX_NARROW_ROUTE = "downmixNarrowRoute";
     private static final String PREF_KEY_CENTRE_BOOST = "centreBoost";
     private static final String PREF_KEY_DYNAMIC_RANGE = "dynamicRange";
     private static final String PREF_KEY_MAP_DV7 = "mapDV7ToHevc";
@@ -289,6 +290,14 @@ class Prefs {
     // silent. Only means anything when audioPassthrough is on; off, the rate changes and the bitstream
     // stays, which is the behaviour every build before this one had.
     public boolean passthroughNormalSpeedOnly = true;
+    // Whether a decoded multichannel track is folded to stereo here when the route cannot carry the
+    // channels. On, the fold is done with the standard coefficients, halved for headroom and bent at
+    // the peaks; off, the multichannel PCM is handed over as it is and the platform folds it. The
+    // platform's fold has no headroom, which is heard as a crackle on a two-channel route — an HDMI
+    // ARC connection above all, since ARC carries stereo PCM and nothing wider. The switch is here
+    // because the route's own answer is not always trustworthy (see audioPassthroughForce), and a
+    // box that reports two channels while carrying eight would lose its surround to this.
+    public boolean downmixNarrowRoute = true;
     // Whether the centre channel, where a film keeps its dialogue, is lifted above the rest. On/off as
     // in the reference player: how far to lift is not a question to put to the viewer, since the answer
     // depends on whether the route carries the channels or folds them into stereo, and that is known
@@ -502,6 +511,8 @@ class Prefs {
                 audioPassthroughForce);
         passthroughNormalSpeedOnly = mSharedPreferences.getBoolean(
                 PREF_KEY_PASSTHROUGH_NORMAL_SPEED_ONLY, passthroughNormalSpeedOnly);
+        downmixNarrowRoute = mSharedPreferences.getBoolean(
+                PREF_KEY_DOWNMIX_NARROW_ROUTE, downmixNarrowRoute);
         centreBoost = mSharedPreferences.getBoolean(PREF_KEY_CENTRE_BOOST, centreBoost);
         dynamicRange = mSharedPreferences.getBoolean(PREF_KEY_DYNAMIC_RANGE, dynamicRange);
         decoderPriority = Integer.parseInt(mSharedPreferences.getString(PREF_KEY_DECODER_PRIORITY, String.valueOf(decoderPriority)));

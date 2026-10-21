@@ -327,6 +327,9 @@
     <string name="pref_passthrough_normal_speed">Pass through only at normal speed</string>
     <string name="pref_passthrough_normal_speed_on">Faster or slower is decoded to multichannel PCM, so the receiver still gets every channel</string>
     <string name="pref_passthrough_normal_speed_off">The bitstream stays on at every speed, and a speed change is refused</string>
+    <string name="pref_downmix_narrow_route">Fold surround to stereo on a two-channel route</string>
+    <string name="pref_downmix_narrow_route_on">A decoded multichannel track is mixed here with headroom, instead of letting a two-channel output fold it and clip</string>
+    <string name="pref_downmix_narrow_route_off">The route folds it: multichannel PCM is sent as it is, and a two-channel output may crackle</string>
     <string name="pref_audio_passthrough_force_off">Only what the HDMI route reports is ever sent on</string>
     <string name="pref_reset_audio_workarounds">Reset learned audio workarounds</string>
     <string name="pref_reset_audio_workarounds_summary">Forget audio formats this device learned to decode instead of passing through</string>
