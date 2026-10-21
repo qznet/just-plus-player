@@ -91,7 +91,66 @@ jobs:
       # of this build is to be installable wherever the fault is being read back from.
       - run: ./gradlew assembleLatestUniversalDebug
 
+      - run: test -f "$HOME/.android/debug.keystore" && keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android | tail -3 || echo "no debug keystore on this runner"
+
       - uses: actions/upload-artifact@v4
         with:
           name: JustPlus.Player.debug
           path: app/build/outputs/apk/latestUniversal/debug/*.apk
+
+  # A release of the fork's own. The job above belongs to the public repository, which owns the
+  # signing key and the download URL every existing install polls; a fork has neither, so this one
+  # builds the same release variant and signs it with the debug key the runner already carries — the
+  # key every fork build so far has been signed with, so an install already on one of those updates
+  # in place instead of being refused.
+  #
+  # It refuses to sign rather than generating a key on the spot: a key generated here would differ
+  # from the one the previous build used, and every existing install would have to be uninstalled
+  # before it could take the update.
+  fork-release:
+    if: github.repository != 'just-plus-player/just-plus-player' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+
+      - run: |
+          test -f "$HOME/.android/debug.keystore" || {
+            echo "No debug keystore on this runner. Refusing to sign with a fresh one, which would" >&2
+            echo "leave every existing install unable to take this update." >&2
+            exit 1
+          }
+          keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android | tail -3
+
+      - run: ./gradlew assembleLatestUniversalRelease
+          -Pandroid.injected.signing.store.file=$HOME/.android/debug.keystore
+          -Pandroid.injected.signing.store.password=android
+          -Pandroid.injected.signing.key.alias=androiddebugkey
+          -Pandroid.injected.signing.key.password=android
+
+      - run: cp app/build/outputs/apk/latestUniversal/release/*.apk JustPlus.Player.apk
+
+      # The notes travel in the tag's annotation, as in the job above: the fetch first, since
+      # checkout leaves the tag lightweight and %(contents) would read the commit instead.
+      - run: |
+          git fetch --no-tags --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > RELEASE_NOTES.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          files: |
+            app/build/outputs/apk/latestUniversal/release/*.apk
+            JustPlus.Player.apk
+          draft: false
+          prerelease: false
