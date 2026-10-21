@@ -91,8 +91,6 @@ jobs:
       # of this build is to be installable wherever the fault is being read back from.
       - run: ./gradlew assembleLatestUniversalDebug
 
-      - run: test -f "$HOME/.android/debug.keystore" && keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android | tail -3 || echo "no debug keystore on this runner"
-
       - uses: actions/upload-artifact@v4
         with:
           name: JustPlus.Player.debug
@@ -100,13 +98,14 @@ jobs:
 
   # A release of the fork's own. The job above belongs to the public repository, which owns the
   # signing key and the download URL every existing install polls; a fork has neither, so this one
-  # builds the same release variant and signs it with the debug key the runner already carries — the
-  # key every fork build so far has been signed with, so an install already on one of those updates
-  # in place instead of being refused.
+  # builds the same release variant and publishes it from the fork's own key, which travels in the
+  # secrets below.
   #
-  # It refuses to sign rather than generating a key on the spot: a key generated here would differ
-  # from the one the previous build used, and every existing install would have to be uninstalled
-  # before it could take the update.
+  # Its own key, not the runner's debug key: that one is generated per run, so every build came out
+  # with a different signature and an install could not take the next build as an update. The key
+  # here does not change, so from this release onward updates install over each other. The first one
+  # is a one-time exception — it carries a different signature from the debug builds before it and
+  # has to replace one by uninstall.
   fork-release:
     if: github.repository != 'just-plus-player/just-plus-player' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
@@ -125,26 +124,29 @@ jobs:
           cache: gradle
 
       - run: |
-          test -f "$HOME/.android/debug.keystore" || {
-            echo "No debug keystore on this runner. Refusing to sign with a fresh one, which would" >&2
-            echo "leave every existing install unable to take this update." >&2
+          test -n "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" || {
+            echo "RELEASE_KEYSTORE_BASE64 is not set on this repository." >&2
             exit 1
           }
-          keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android | tail -3
+          echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 --decode > ${GITHUB_WORKSPACE}/keystore.jks
+          keytool -list -keystore ${GITHUB_WORKSPACE}/keystore.jks \
+            -storepass "${{ secrets.RELEASE_KEYSTORE_PASSWORD }}" | tail -2
 
-      - run: ./gradlew assembleLatestUniversalRelease
-          -Pandroid.injected.signing.store.file=$HOME/.android/debug.keystore
-          -Pandroid.injected.signing.store.password=android
-          -Pandroid.injected.signing.key.alias=androiddebugkey
-          -Pandroid.injected.signing.key.password=android
-
-      - run: cp app/build/outputs/apk/latestUniversal/release/*.apk JustPlus.Player.apk
-
-      # The notes travel in the tag's annotation, as in the job above: the fetch first, since
-      # checkout leaves the tag lightweight and %(contents) would read the commit instead.
+      # Before the build, twice over. The notes travel in the tag's annotation, and the version name
+      # comes from what `git describe` finds: checkout fetches the tag by commit and leaves the
+      # annotated object behind, so without this the build would name itself after the commit hash.
       - run: |
           git fetch --no-tags --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > RELEASE_NOTES.md
+          git describe --tags
+
+      - run: ./gradlew assembleLatestUniversalRelease
+          -Pandroid.injected.signing.store.file=${GITHUB_WORKSPACE}/keystore.jks
+          -Pandroid.injected.signing.store.password=${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          -Pandroid.injected.signing.key.alias=justplus
+          -Pandroid.injected.signing.key.password=${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+
+      - run: cp app/build/outputs/apk/latestUniversal/release/*.apk JustPlus.Player.apk
 
       - uses: softprops/action-gh-release@v2
         with:
