@@ -349,6 +349,20 @@ public class PlayerActivity extends Activity {
     // and a room all ask for a speed, and all of them get the same answer from the sink.
     private float speedRequested = 1f;
     private boolean speedRefusalSaid;
+    // Audio that a rate change has to move between bitstream and decoded PCM. A bitstream carries no
+    // time base the app can stretch, so 1x is the only rate at which it can be handed to a receiver; every
+    // other rate needs the track decoded, and the sink can only be told that by being configured again
+    // (see applyAudioModeForSpeed / reselectAudioTrackForMode).
+    //
+    // A mode chosen while paused waits for playback: a reselect made against a paused player leaves a
+    // stale audio track behind, which is the failure the background release comment already describes.
+    private boolean audioModePending;
+    private float audioModePendingSpeed = 1f;
+    // Rate stepping is continuous by nature — a held key lands a press every 140 ms — and each crossing of
+    // 1x tears down and rebuilds the audio track. Coming back to 1x is the common way to finish a step
+    // down, so without this a viewer stepping through 1x pays for two rebuilds a second apart.
+    private static final long AUDIO_MODE_MIN_INTERVAL_MS = 1200;
+    private long audioModeSwitchMs;
     // A playlist item that started mid-session still owes the display a mode of its own; spent as
     // soon as the item's own frame rate can be read. See matchDisplayModeForNewItem.
     private boolean modeMatchPending;
@@ -1048,6 +1062,12 @@ public class PlayerActivity extends Activity {
     private int reselectNudges;
     private boolean nudgedThisReselect;
     private final Runnable reselectWedgeRunnable = this::nudgeWedgedReselect;
+    // The rebuild a second crossing of 1x still owes, put off until the window the first one set has
+    // passed. See scheduleAudioModeReselect.
+    private final Runnable audioModeReselectRunnable = () -> {
+        audioModeSwitchMs = SystemClock.uptimeMillis();
+        reselectAudioTrackForMode();
+    };
     // Whether the current item has ever actually played. The first start of an item opens its own fresh
     // output, so there is nothing to re-lock — and recreating the track at that exact instant is what left
     // roughly one opening in three with no sound at all, twice. Spending the latch waits for a real second
@@ -10039,7 +10059,110 @@ public class PlayerActivity extends Activity {
             return;
         }
         speedRequested = speed;
+        // The mode first, and the rate only once the sink has been told: a bitstream cannot be stretched,
+        // so asking for a rate while the sink is still configured to bitstream is asking to be refused.
+        // When the mode moves, the reselect is what carries the rate along with it (see onTracksChanged).
+        if (applyAudioModeForSpeed(speed)) {
+            return;
+        }
         player.setPlaybackSpeed(speed);
+    }
+
+    /**
+     * Move the audio path between bitstream and decoded PCM to match a rate, and say whether the rate has
+     * to wait for that move.
+     *
+     * <p>Pass-through means the receiver decodes: the app hands over a compressed frame and never sees the
+     * samples, which is also why it cannot time-stretch them. So at 1x a multichannel track goes out as it
+     * arrived — Dolby, DTS, TrueHD, whatever the receiver reads on its display — and at any other rate it
+     * is decoded here into multichannel PCM instead. That is the whole trade: the rate is worth more than
+     * the bitstream's label, and the receiver still gets every channel.
+     *
+     * <p>Nothing is done when pass-through is off outright, because then the sink already decodes
+     * everything and there is no bitstream to take away.
+     *
+     * @return true when the rate was left for the reselect to apply, false when the caller should set it
+     *     now. A rate that stays on the same side of 1x is false: nothing was reconfigured.
+     */
+    private boolean applyAudioModeForSpeed(float speed) {
+        if (!mPrefs.audioPassthrough || !mPrefs.passthroughNormalSpeedOnly
+                || audioSink == null || player == null) {
+            return false;
+        }
+        // A room trims the rate a few percent either way to close drift, four times a second, and none
+        // of that is a rate the viewer asked for: a wider tolerance keeps the receiver on the bitstream
+        // for it instead of tearing the audio down and back up on every correction.
+        final float tolerance = together != null && together.isActive() ? 0.15f : 0.005f;
+        final boolean normal = Math.abs(speed - 1f) <= tolerance;
+        // setForceDecode answers false when the mode is already where this rate wants it, which is the
+        // ordinary case while stepping inside one side of 1x.
+        if (!audioSink.setForceDecode(!normal)) {
+            return false;
+        }
+        Utils.log("audio mode: " + (normal ? "pass-through" : "decoded") + " at " + speed
+                + " (playing=" + player.isPlaying() + ")");
+        if (!player.isPlaying()) {
+            // Nothing is configuring the sink right now, and a reselect against a paused player leaves a
+            // stale track behind. Remember both halves; onIsPlayingChanged picks them up when playback
+            // resumes. The rate waits with the mode rather than going out now: a paused player holds the
+            // bitstream configuration it was last given, and asking a bitstream to stretch is a refusal
+            // the viewer would be told about for a rate that is about to work.
+            audioModePending = true;
+            audioModePendingSpeed = speed;
+            return true;
+        }
+        final long now = SystemClock.uptimeMillis();
+        final long since = now - audioModeSwitchMs;
+        audioModePending = true;
+        audioModePendingSpeed = speed;
+        if (since < AUDIO_MODE_MIN_INTERVAL_MS) {
+            // A second crossing hard on the first, which a rate step makes easy: stepping back through
+            // 1x and up again inside the window. The rebuild is put off until the window has passed
+            // rather than dropped — dropped, a viewer who came back to 1x would keep hearing decoded PCM
+            // until something else happened to reconfigure the sink. The rate waits with it, because the
+            // sink is the old one still and a rate on the other side of 1x is exactly what it cannot take.
+            scheduleAudioModeReselect(AUDIO_MODE_MIN_INTERVAL_MS - since);
+            return true;
+        }
+        audioModeSwitchMs = now;
+        reselectAudioTrackForMode();
+        return true;
+    }
+
+    /**
+     * The rebuild that a crossing inside {@link #AUDIO_MODE_MIN_INTERVAL_MS} of the last one still owes,
+     * put off until the window is over. On the view's queue because this is a redraw-paced affair: a
+     * viewer who leaves the player inside the window takes the appointment with them.
+     */
+    private void scheduleAudioModeReselect(long delayMs) {
+        if (playerView == null) {
+            return;
+        }
+        playerView.removeCallbacks(audioModeReselectRunnable);
+        playerView.postDelayed(audioModeReselectRunnable, Math.max(delayMs, 0));
+        Utils.log("audio mode: reselect in " + delayMs + "ms");
+    }
+
+    /**
+     * Make the renderer configure the audio sink again, so that the {@code forceDecode} answer it asked is
+     * asked once more.
+     *
+     * <p>The same two halves as {@link #restartPassthroughAudio}: disabling the audio track type reaches
+     * the renderer's onDisabled and releases the track, and onTracksChanged puts the type back, rebuilt
+     * from the parameters of that moment. Unlike that method this one is not about a torn-down bitstream
+     * and so does not wait for the sink to be bitstreaming — the direction it runs in is often the other
+     * way, from bitstream back to decode.
+     */
+    private void reselectAudioTrackForMode() {
+        if (player == null || audioRestartInFlight) {
+            // A reselect is already settling; it will configure the sink with whatever the flag says by
+            // then, which is the same answer this call wanted.
+            return;
+        }
+        audioRestartInFlight = true;
+        Utils.log("audio mode: reselect");
+        player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true).build());
     }
 
     /**
@@ -11404,7 +11527,11 @@ public class PlayerActivity extends Activity {
         // and never bitstreams. This is "surround pass-through off": it keeps multichannel PCM (the sink's
         // real channel capabilities are untouched) but takes away the bitstream route and, with it, the
         // whole reselect/wedge/dead-route chain that route drags in on some boxes across a pause.
-        private final boolean forceDecode;
+        //
+        // Volatile rather than final: a bitstream cannot be time-stretched, so a rate other than 1x has to
+        // decode, and the switch is made while the sink is already built (see applyAudioModeForSpeed).
+        // Read on the playback thread by refused() below, written from the app thread.
+        private volatile boolean forceDecode;
         // True while the sink bitstreams a compressed format: the renderer configures us with a non-PCM
         // format only when it runs in bypass (passthrough), never when a decoder feeds us. Read on the app
         // thread by restartPassthroughAudio(), written here on the playback thread. Deliberately
@@ -11464,6 +11591,23 @@ public class PlayerActivity extends Activity {
 
         boolean isPassthrough() {
             return passthrough;
+        }
+
+        /**
+         * Whether compressed formats are refused, i.e. whether everything is decoded to PCM.
+         *
+         * <p>Only the flag moves here. The renderer asks its questions when it configures the sink, which
+         * is what makes a bare write useless on its own: the caller has to make the renderer configure
+         * again, and that is the reselect in {@code reselectAudioTrackForMode}.
+         *
+         * @return whether the answer changed, so a rate that stays on the same side of 1x costs nothing.
+         */
+        boolean setForceDecode(boolean force) {
+            if (forceDecode == force) {
+                return false;
+            }
+            forceDecode = force;
+            return true;
         }
 
         @Override
@@ -11578,6 +11722,13 @@ public class PlayerActivity extends Activity {
         // A restart that never got its onTracksChanged belongs to the player being replaced here.
         audioRestartInFlight = false;
         audioRestartSettling = false;
+        // A mode change owed to the old sink: the fresh one is built with the rate's own answer, so the
+        // debt dies with it. Without this, the first play of the new player would reselect for nothing.
+        audioModePending = false;
+        audioModeSwitchMs = 0;
+        if (playerView != null) {
+            playerView.removeCallbacks(audioModeReselectRunnable);
+        }
         audioEverStarted = false;
         audioReselectAtMs = 0;
         playerView.removeCallbacks(rebufferArmRunnable);
@@ -11939,8 +12090,14 @@ public class PlayerActivity extends Activity {
                                         new DynamicRangeProcessor(routeChannels <= 2)}
                                 : new AudioProcessor[]{boostProcessor});
                 AudioSink sink = builder.build();
-                audioSink = new AudioPassthroughDenylistSink(sink, revokedAudioMimes,
-                        !mPrefs.audioPassthrough, mPrefs.audioSyncMs, mPrefs.audioPassthroughSyncMs);
+                // The mode this session opens in, decided here rather than by a reselect on the first
+                // frame: a remembered rate other than 1x means there is no bitstream to hand over, and
+                // building the sink in the wrong mode would cost one rebuild before anything played.
+                final boolean decodeCompressed = !mPrefs.audioPassthrough
+                        || (mPrefs.passthroughNormalSpeedOnly
+                                && Math.abs(mPrefs.speed - 1f) >= 0.005f);
+                audioSink = new AudioPassthroughDenylistSink(sink, revokedAudioMimes, decodeCompressed,
+                        mPrefs.audioSyncMs, mPrefs.audioPassthroughSyncMs);
                 return audioSink;
             }
 
@@ -13323,6 +13480,14 @@ public class PlayerActivity extends Activity {
                 if (player != null) {
                     player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
                             .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false).build());
+                    // The rate that asked for this reselect goes out now. It could not go out before:
+                    // the sink was still configured for a bitstream, and a bitstream cannot be stretched.
+                    // Rebuilt from the parameters just applied, so this is the audio the viewer will hear.
+                    if (audioModePending) {
+                        audioModePending = false;
+                        Utils.log("audio mode: rate " + audioModePendingSpeed + " after reselect");
+                        player.setPlaybackSpeed(audioModePendingSpeed);
+                    }
                 }
                 return;
             }
@@ -13430,6 +13595,12 @@ public class PlayerActivity extends Activity {
                 secondarySubtitleOffset.wake();
             }
             if (isPlaying) {
+                // A mode chosen while paused could not reconfigure anything then — the renderer was not
+                // configuring the sink. This is the first moment it runs again, so the track is made
+                // fresh here rather than revived with the answer it was given before the pause.
+                if (audioModePending && !audioRestartInFlight && audioSink != null) {
+                    reselectAudioTrackForMode();
+                }
                 // Fresh baseline for the freeze watchdog: nothing is output while paused, and whatever
                 // the last window measured belongs to a playback that has since stopped.
                 frameOutputSeen = -1;

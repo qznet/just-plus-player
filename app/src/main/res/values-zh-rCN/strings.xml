@@ -73,6 +73,9 @@
     <string name="pref_audio_passthrough_force">即使不受支持也直通</string>
     <string name="pref_audio_passthrough_force_off">只发送 HDMI 通道报告可以接收的格式</string>
     <string name="pref_audio_passthrough_force_on">设备声明一概不收时也会发送</string>
+    <string name="pref_passthrough_normal_speed">仅在正常速度下直通</string>
+    <string name="pref_passthrough_normal_speed_on">倍速时解码为多声道 PCM，功放仍能收到每个声道</string>
+    <string name="pref_passthrough_normal_speed_off">任何速度都保持直通，但变速会被拒绝</string>
     <string name="pref_audio_passthrough_off">所有音轨都在此解码，不由接收设备解码</string>
     <string name="pref_audio_passthrough_on">Dolby 与 DTS 原样送往接收设备</string>
     <string name="pref_audio_sync">音频延迟</string>

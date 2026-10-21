@@ -89,6 +89,7 @@ class Prefs {
     private static final String PREF_KEY_AUDIO_SYNC_MS = "audioSyncMs";
     private static final String PREF_KEY_AUDIO_PASSTHROUGH_SYNC_MS = "audioPassthroughSyncMs";
     private static final String PREF_KEY_AUDIO_PASSTHROUGH_FORCE = "audioPassthroughForce";
+    private static final String PREF_KEY_PASSTHROUGH_NORMAL_SPEED_ONLY = "passthroughNormalSpeedOnly";
     private static final String PREF_KEY_CENTRE_BOOST = "centreBoost";
     private static final String PREF_KEY_DYNAMIC_RANGE = "dynamicRange";
     private static final String PREF_KEY_MAP_DV7 = "mapDV7ToHevc";
@@ -281,6 +282,13 @@ class Prefs {
     // bitstream encodings are offered whatever the route claims, and a refusal is learnt from the
     // failure rather than predicted (see AudioPassthroughDenylistSink).
     public boolean audioPassthroughForce = false;
+    // Whether the bitstream is given up when the rate leaves 1x, so that speed and surround stop being a
+    // choice between them: at 1x the receiver decodes the original Dolby/DTS, at any other rate the track
+    // is decoded here into multichannel PCM and the receiver still gets every channel. A bitstream cannot
+    // be time-stretched, so this is what makes "faster" possible without dropping to stereo or going
+    // silent. Only means anything when audioPassthrough is on; off, the rate changes and the bitstream
+    // stays, which is the behaviour every build before this one had.
+    public boolean passthroughNormalSpeedOnly = true;
     // Whether the centre channel, where a film keeps its dialogue, is lifted above the rest. On/off as
     // in the reference player: how far to lift is not a question to put to the viewer, since the answer
     // depends on whether the route carries the channels or folds them into stereo, and that is known
@@ -492,6 +500,8 @@ class Prefs {
         audioPassthrough = mSharedPreferences.getBoolean(PREF_KEY_AUDIO_PASSTHROUGH, audioPassthrough);
         audioPassthroughForce = mSharedPreferences.getBoolean(PREF_KEY_AUDIO_PASSTHROUGH_FORCE,
                 audioPassthroughForce);
+        passthroughNormalSpeedOnly = mSharedPreferences.getBoolean(
+                PREF_KEY_PASSTHROUGH_NORMAL_SPEED_ONLY, passthroughNormalSpeedOnly);
         centreBoost = mSharedPreferences.getBoolean(PREF_KEY_CENTRE_BOOST, centreBoost);
         dynamicRange = mSharedPreferences.getBoolean(PREF_KEY_DYNAMIC_RANGE, dynamicRange);
         decoderPriority = Integer.parseInt(mSharedPreferences.getString(PREF_KEY_DECODER_PRIORITY, String.valueOf(decoderPriority)));
