@@ -275,4 +275,26 @@
     <string name="sound_session_title">本次播放的声音</string>
     <string name="sound_summary_centre_boost">人声已提升</string>
     <string name="sound_summary_dynamic_range">已均衡</string>
+    <string name="pref_app_language_system">跟随系统</string>
+    <string name="pref_theme_system">跟随系统</string>
+    <string name="pref_theme_dark">深色</string>
+    <string name="pref_theme_light">浅色</string>
+    <string name="pref_all_files_access_on">已授权。本机的每个文件夹都可以浏览。</string>
+    <string name="pref_all_files_access_off">未授权。没有它，文件浏览只能看到文件夹，看不到里面的文件。</string>
+    <string name="pref_about_device">设备信息</string>
+    <string name="pref_language_audio_none">未设置 — 播放文件里的第一条音轨</string>
+    <string name="pref_language_audio_add">添加语言</string>
+    <string name="pref_language_audio_move_up">上移</string>
+    <string name="pref_language_audio_move_down">下移</string>
+    <string name="pref_language_audio_remove">移除</string>
+    <string name="pref_language_subtitle_none">未设置 — 字幕保持关闭，直到你手动打开</string>
+    <string name="pref_language_subtitle_secondary_none">未设置 — 第二字幕只在播放中选择</string>
+    <string name="pref_subtitle_preview_sample">字幕的显示效果就是这样</string>
+    <string name="pref_reset_audio_workarounds_done">已清除</string>
+    <string name="pref_reset_section">重置本节</string>
+    <string name="pref_reset_all">重置全部设置</string>
+    <string name="pref_reset_ask">重置这些设置？</string>
+    <string name="pref_reset_ask_all">重置所有设置？</string>
+    <string name="pref_reset_do">重置</string>
+    <string name="pref_reset_done">设置已重置</string>
 </resources>
