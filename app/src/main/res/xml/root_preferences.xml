@@ -199,6 +199,14 @@
             app:title="@string/pref_video_header">
 
             <ListPreference
+                app:key="screenOrientation"
+                app:defaultValue="0"
+                app:entries="@array/screen_orientation_entries"
+                app:entryValues="@array/screen_orientation_values"
+                app:title="@string/pref_screen_orientation"
+                app:useSimpleSummaryProvider="true" />
+
+            <ListPreference
                 app:key="backBufferMs"
                 app:defaultValue="5000"
                 app:entries="@array/back_buffer_entries"
@@ -775,19 +783,6 @@
                 app:summaryOff="@string/pref_fullscreen_speed_keys_off"
                 app:title="@string/pref_fullscreen_speed_keys" />
 
-        <PreferenceCategory
-            app:key="privacyCategory"
-            app:title="@string/pref_privacy_header">
-
-            <SwitchPreferenceCompat
-                app:key="crashReporting"
-                app:defaultValue="false"
-                app:summaryOn="@string/pref_crash_reporting_on"
-                app:summaryOff="@string/pref_crash_reporting_off"
-                app:title="@string/pref_crash_reporting" />
-
-        </PreferenceCategory>
-
         </PreferenceScreen>
 
         <PreferenceScreen
@@ -820,6 +815,33 @@
                     app:persistent="false"
                     app:summary="@string/about_github_repo"
                     app:title="@string/pref_about_source" />
+
+            </PreferenceCategory>
+
+            <!-- Both ways a report leaves: by hand, whether or not statistics are on (the player's own
+                 report row rides the stats panel), and in the background to Sentry. -->
+            <PreferenceCategory app:title="@string/pref_diagnostics_header">
+
+                <Preference
+                    app:key="sendAppLog"
+                    app:persistent="false"
+                    app:summary="@string/pref_send_app_log_summary"
+                    app:title="@string/pref_send_app_log" />
+
+                <!-- Governs only what leaves by hand: Sentry is masked whatever this says. -->
+                <SwitchPreferenceCompat
+                    app:key="maskReports"
+                    app:defaultValue="true"
+                    app:summaryOn="@string/pref_mask_reports_on"
+                    app:summaryOff="@string/pref_mask_reports_off"
+                    app:title="@string/pref_mask_reports" />
+
+                <SwitchPreferenceCompat
+                    app:key="crashReporting"
+                    app:defaultValue="false"
+                    app:summaryOn="@string/pref_crash_reporting_on"
+                    app:summaryOff="@string/pref_crash_reporting_off"
+                    app:title="@string/pref_crash_reporting" />
 
             </PreferenceCategory>
 

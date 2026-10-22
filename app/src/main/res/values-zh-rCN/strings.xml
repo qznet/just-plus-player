@@ -264,4 +264,15 @@
     <string name="speed_title">播放速度</string>
     <string name="stats_title">统计信息</string>
     <string name="together_title">一起观看</string>
+    <string name="pref_diagnostics_header">诊断</string>
+    <string name="pref_mask_reports">隐藏报告中的链接</string>
+    <string name="pref_mask_reports_off">报告会带上完整的视频链接（含令牌）。上传后的报告是公开的</string>
+    <string name="pref_mask_reports_on">视频链接只保留服务器与路径，本地文件只保留类型</string>
+    <string name="pref_screen_orientation">屏幕方向</string>
+    <string name="pref_send_app_log">发送应用日志</string>
+    <string name="pref_send_app_log_summary">应用启动以来的动作记录，用于提交问题报告</string>
+    <string name="sound_row">声音</string>
+    <string name="sound_session_title">本次播放的声音</string>
+    <string name="sound_summary_centre_boost">人声已提升</string>
+    <string name="sound_summary_dynamic_range">已均衡</string>
 </resources>

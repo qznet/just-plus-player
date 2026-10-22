@@ -316,6 +316,9 @@ public final class UpdateUi {
         final com.google.android.material.progressindicator.LinearProgressIndicator bar =
                 new com.google.android.material.progressindicator.LinearProgressIndicator(dialogContext);
         bar.setMax(100);
+        // No dot at the far end: M3 draws one on a determinate track, and at the start of a download it
+        // read as a second, stray piece of progress rather than as where the bar ends.
+        bar.setTrackStopIndicatorSize(0);
         bar.setIndeterminate(info.size <= 0);
 
         final int pad = dp(dialogContext, 20);
@@ -357,6 +360,15 @@ public final class UpdateUi {
                     }
                     if (file != null) {
                         Updater.installApk(activity, file);
+                        // Installing kills this process without a lifecycle, and the player hands a launcher
+                        // its result (position, length, which episode) only in finish(). Leaving the player
+                        // now is what gets that result to Lampa and the like before the kill; the installer
+                        // is a task of its own and stays in front. Only for a player a launcher waits on:
+                        // anyone else keeps it, paused where they were, should the install not go through.
+                        if (activity instanceof com.brouken.player.PlayerActivity
+                                && ((com.brouken.player.PlayerActivity) activity).returnsResult()) {
+                            activity.finish();
+                        }
                     } else {
                         com.brouken.player.Notice.show(activity, R.string.update_download_failed,
                                 true, R.drawable.ic_update_24dp);

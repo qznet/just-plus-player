@@ -21,7 +21,6 @@ import android.content.ContentUris;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.content.UriPermission;
 import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
@@ -105,12 +104,14 @@ import androidx.coordinatorlayout.widget.CoordinatorLayout;
 import androidx.core.content.ContextCompat;
 
 import com.google.android.material.color.MaterialColors;
+import com.google.common.collect.ImmutableList;
 import com.google.android.material.shape.ShapeAppearanceModel;
 import com.google.android.material.shape.MaterialShapeDrawable;
 import androidx.core.graphics.ColorUtils;
 import androidx.documentfile.provider.DocumentFile;
 import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
+import androidx.media3.common.util.Clock;
 import androidx.media3.common.util.Util;
 import androidx.media3.common.ColorInfo;
 import androidx.media3.common.Format;
@@ -158,6 +159,7 @@ import androidx.media3.exoplayer.mediacodec.MediaCodecInfo;
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector;
 import androidx.media3.exoplayer.mediacodec.MediaCodecUtil;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
+import androidx.media3.exoplayer.upstream.BandwidthMeter;
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy;
 import androidx.media3.exoplayer.upstream.Loader;
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy.LoadErrorInfo;
@@ -168,6 +170,7 @@ import androidx.media3.exoplayer.source.TrackGroupArray;
 import androidx.media3.exoplayer.video.MediaCodecVideoDecoderException;
 import androidx.media3.exoplayer.video.MediaCodecVideoRenderer;
 import androidx.media3.exoplayer.video.VideoRendererEventListener;
+import androidx.media3.exoplayer.trackselection.AdaptiveTrackSelection;
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector;
 import androidx.media3.exoplayer.trackselection.MappingTrackSelector;
 import androidx.media3.extractor.DefaultExtractorsFactory;
@@ -633,10 +636,11 @@ public class PlayerActivity extends Activity {
     };
     // A fatal report has just been shown for the current clip. onStart re-initialises the player every
     // time the activity comes back, so without this the clip is prepared again the moment the report is
-    // closed, fails the same way and reopens it — a window that cannot be dismissed. Fall back to the
-    // empty state instead, as the media-gone path does. One-shot: consumed by that next initialisation,
-    // so re-opening the same clip, or picking another one, plays normally.
-    private boolean skipMediaAfterFatalError;
+    // closed, fails the same way and reopens it — a window that cannot be dismissed. The clip stays loaded
+    // but idle at the position it failed at, and play is the retry: an error never closes the player,
+    // only the viewer does. One-shot: consumed by that next return. Held by the clip, not as a flag, so
+    // a different clip opened meanwhile (onNewIntent, a picker) plays as usual.
+    private Uri heldAfterError;
     // Re-reads spent on network source errors this session (see recoverFromSourceError), reset per player
     // build so a chronically bad stream costs a bounded number of re-prepares instead of one per resume.
     private int sourceRetries;
@@ -683,8 +687,13 @@ public class PlayerActivity extends Activity {
     // Backgrounding keeps the player (see onStop) instead of tearing it down, so a quick round-trip —
     // settings, notification shade, app switch — returns to the same session, paused, instead of
     // re-buffering the stream. The decoder is held for it, so give up once the user is plainly gone: after
-    // this the teardown is the same as before. Tune if holding a decoder that long proves a problem.
-    private static final long BACKGROUND_RELEASE_MS = TimeUnit.MINUTES.toMillis(5);
+    // this the teardown is the same as before. Thirty minutes rather than five, so a pause and a locked
+    // phone keep the buffer a weak mobile link paid for. A paused decoder does no work, and a phone's is
+    // not exclusive: the system reclaims it from a background app that is asked for, and the return
+    // then takes the player-error branch in onStart, the same rebuild as this release. The one exclusive
+    // resource, a passthrough output, onStop hands back at once. A pause on screen has no timer at all:
+    // the stop() it used to get after five minutes freed only an idle socket and threw the buffer away.
+    private static final long BACKGROUND_RELEASE_MS = TimeUnit.MINUTES.toMillis(30);
     private final Runnable backgroundReleaseRunnable = () -> {
         // The return finds no player and rebuilds it; that rebuild must not start playing on its own.
         sourceSwitchKeepPaused = true;
@@ -757,6 +766,8 @@ public class PlayerActivity extends Activity {
     // of their fade — with the states in between keeping whatever the last edge decided.
     private boolean controllerChromeVisible;
     public static Snackbar snackbar;
+    // The TV dialog of a held load stall, closed when playback resumes on its own.
+    private AlertDialog stallDialog;
 
     /** What {@link #hardwareVerdict} answered, per format; the device cannot change its mind. */
     private final Map<String, Integer> hardwareVerdicts = new HashMap<>();
@@ -839,6 +850,7 @@ public class PlayerActivity extends Activity {
     private android.app.Dialog qualityDialog;
     private android.app.Dialog playlistDialog;
     private android.app.Dialog skipOffsetDialog;
+    private android.app.Dialog soundDialog;
     private android.app.Dialog subtitleOffsetDialog;
     private android.app.Dialog sleepTimerDialog;
     private android.app.Dialog speedDialog;
@@ -887,18 +899,6 @@ public class PlayerActivity extends Activity {
     // the controller timeout to -1) burnt into a panel for as long as the pause lasts. So the hold comes
     // with a black sheet faded over everything once the pause has stood a minute, and is given up
     // altogether once it has stood two hours: whoever fell asleep does not need the television on.
-    /**
-     * How long a pause may hold the source open. Nothing on the pause path closes it: the loader is
-     * blocked at the byte cap with a read half-issued, so the connection stays established and silent —
-     * measured at four minutes and counting, zero bytes, while 144 MB of buffer stays allocated. A
-     * torrent backend has a reader registered for that socket the whole time.
-     *
-     * <p>Long on purpose. player.stop() keeps the timeline and the position but drops the buffer, so
-     * resuming pays a fresh container read (four cold range requests on a 56 GB Matroska) plus the
-     * refill — which for a short pause costs the server more than the idle socket does. Five minutes is
-     * past the point where the viewer is coming straight back.
-     */
-    private static final long PAUSE_RELEASE_MS = 5 * 60 * 1000L;
     private static final long DIM_DELAY_MS = 60_000L;
     private static final long KEEP_AWAKE_MAX_MS = 2 * 60 * 60 * 1000L;
     private static final float DIM_ALPHA = 0.85f;
@@ -906,37 +906,9 @@ public class PlayerActivity extends Activity {
     private static final int DIM_OUT_MS = 300;
     private View dimOverlay;
     private final Runnable dimRunnable = this::dim;
-    // Set while the source was let go under a standing pause, so the next play re-prepares rather than
-    // leaving an idle player with a play button that does nothing.
-    private boolean stoppedForPause;
     // Set while the audio track type is disabled for a trip to the background (see onStop), so onStart
     // knows to put it back.
     private boolean audioReleasedForBackground;
-    private final Runnable pauseReleaseRunnable = () -> {
-        if (player == null || player.getPlayWhenReady() || player.isPlaying()) {
-            return;
-        }
-        // Letting the source go means re-preparing it on resume, and a re-prepare re-instantiates the
-        // video decoder. On a TV box that is the one move that can fail for good: a Realtek 4K Dolby
-        // Vision decoder re-init after teardown returns OMX_ErrorInsufficientResources (0x80001000),
-        // reports it unrecoverable, and no rung of the recovery ladder can get it back — while a cold app
-        // start allocates the very same decoder in half a second (field trace, S01E05, 4K dvhe.08.06).
-        // So on a TV box the idle socket and the held buffer are the cheaper cost; keep them. Phones
-        // re-instantiate decoders without complaint and keep the optimisation. The exclusive passthrough
-        // route this stop() also used to hand back is handed back by onStop instead, which is where a
-        // real trip to the background — the case that route contention actually comes from — goes.
-        // ponytail: gated by device class, not by probing the format, because there is no ask-in-advance
-        // for "will this decoder re-init", and a held buffer on a five-minute TV pause is nothing next to
-        // an error screen. Revisit if a TV box turns up that both needs the socket freed and re-inits fine.
-        if (isTvBox) {
-            return;
-        }
-        Utils.log("pause: releasing the source after " + PAUSE_RELEASE_MS / 1000 + "s");
-        stoppedForPause = true;
-        // Not releasePlayer(): stop() leaves the item, the position and the surface in place, so this
-        // costs one prepare() on resume and nothing else.
-        player.stop();
-    };
     private final Runnable keepAwakeGiveUpRunnable = () -> holdScreen(false);
     // Set while a Down press is opening the controls, so focus lands on the time bar instead of play/pause.
     private boolean focusTimeBarOnShow;
@@ -1151,6 +1123,9 @@ public class PlayerActivity extends Activity {
     final List<MediaItem> apiMediaItems = new ArrayList<>();
     final List<String> apiPlaylistSegments = new ArrayList<>();
     int apiPlaylistStartIndex;
+    // The item the single-item extras (season, episode) describe: the one the intent's data uri points
+    // at. Unlike apiPlaylistStartIndex, which follows playback around for rebuilds, this stays put.
+    int apiExtrasIndex;
     // Per-episode resume positions for non-persistent playlist sessions (in-session only). One slot per
     // playlist item aligned by index; null when there is no playlist. Kept off the player so it survives
     // an onStop/release rebuild. See onPositionDiscontinuity()/savePlayer().
@@ -1213,6 +1188,11 @@ public class PlayerActivity extends Activity {
     // Skip-segment timing offset (seconds) — in-session only, never persisted; applies to all
     // playlist items and is reset on a new media session (resetApiAccess).
     private double skipOffsetSec = 0;
+    // The sound's two switches for this session, null = follow the settings. Scoped like the skip
+    // offset: the next file of the folder keeps them, a film picked afresh starts from the settings.
+    private Boolean dynamicRangeSession;
+    private Boolean centreBoostSession;
+    private DynamicRangeProcessor dynamicRangeProcessor;
     // How this session offers segments, or null to follow the settings. One value for both kinds,
     // because the viewer mid-film holds one intention and not two — "stop interrupting me in this
     // series" — and two rows of it were two rows of the same answer. Same life as the offset above and
@@ -1305,6 +1285,12 @@ public class PlayerActivity extends Activity {
     boolean sourceSwitchKeepPaused;
     List<MediaItem.SubtitleConfiguration> apiSubs = new ArrayList<>();
     boolean intentReturnResult;
+
+    /** Whether the app that started this player is waiting for its result (position, which episode). */
+    public boolean returnsResult() {
+        return intentReturnResult;
+    }
+
     boolean playbackFinished;
     // The last state worth handing a launcher back: an item that really played, where it was left and
     // how long it is. An item that stalled or failed has neither a position nor a duration of its own,
@@ -1889,8 +1875,8 @@ public class PlayerActivity extends Activity {
         }
         buttonRotation = new ImageButton(this, null, 0, R.style.ExoStyledControls_Button_Bottom);
         buttonRotation.setContentDescription(getString(R.string.button_rotate));
-        updateButtonRotation();
-        buttonRotation.setOnClickListener(view -> cycleOrientation());
+        buttonRotation.setImageResource(R.drawable.ic_screen_rotation_24dp);
+        buttonRotation.setOnClickListener(view -> rotateScreen());
 
         buttonLock = new ImageButton(this, null, 0, R.style.ExoStyledControls_Button_Bottom);
         buttonLock.setImageResource(R.drawable.ic_lock_24dp);
@@ -2939,12 +2925,16 @@ public class PlayerActivity extends Activity {
             // The session survived being backgrounded but the player did not: Media3 stops it when the
             // surface detach times out (see onPlayerError), so resuming would show a dead picture. Same
             // window rule as the resume watchdog: a TV box gets a fresh one rather than a rebuild.
-            if (!recoverByRestartingTheScreen(player.getPlayerError())) {
+            // Not when the viewer is back from the report on that failure: a fresh window would replay it,
+            // and the rebuild below holds it idle instead.
+            if (heldAfterError != null || !recoverByRestartingTheScreen(player.getPlayerError())) {
                 sourceSwitchKeepPaused = true;
                 releasePlayer(false);
                 initializePlayer();
             }
         } else {
+            // A report opened over a healthy session (a notice's Details) has nothing to hold.
+            heldAfterError = null;
             // The audio track type onStop disabled to hand the receiver's route back. The track this builds
             // is unstarted, since the player is paused; the latch the pause armed recreates it on play.
             if (audioReleasedForBackground) {
@@ -2952,8 +2942,15 @@ public class PlayerActivity extends Activity {
                 player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
                         .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false).build());
             }
-            resumeFrameRendered = false;
-            playerView.postDelayed(resumeWatchdogRunnable, RESUME_WATCHDOG_MS);
+            // Only a session that had started before we left. A VIEW intent delivered to a stopped screen
+            // reaches onNewIntent before onStart, so the player here may be one built a moment ago for new
+            // media: a slow stream with its first bytes in and no frame yet looked like a dead return, and
+            // the rebuild - paused, as a return should be - is what opened a Lampa link on a pause.
+            // A fresh load that never gets going is the load watchdog's, armed below.
+            if (playerStartPositionMs != C.TIME_UNSET) {
+                resumeFrameRendered = false;
+                playerView.postDelayed(resumeWatchdogRunnable, RESUME_WATCHDOG_MS);
+            }
             // Put back what onStop cancelled, and only that: a load that was still buffering when the user
             // left gets a full timeout from the moment they are looking at it again.
             if (player.getPlaybackState() == Player.STATE_BUFFERING) {
@@ -2967,7 +2964,6 @@ public class PlayerActivity extends Activity {
             together.resume();
         }
         updateRoomBadge();
-        updateButtonRotation();
     }
 
     @Override
@@ -3061,8 +3057,8 @@ public class PlayerActivity extends Activity {
         // not change across the trip and onPlaybackStateChanged never re-fires.
         cancelLoadWatchdog();
         playerView.removeCallbacks(resumeWatchdogRunnable);
-        // Not on a TV box: the return would rebuild the decoder inside the same window, which is what
-        // pauseReleaseRunnable stopped doing there for the same reason. The exclusive route is handed
+        // Not on a TV box: the return would rebuild the decoder inside the same window, and a Realtek 4K
+        // Dolby Vision decoder does not survive that (0x80001000). The exclusive route is handed
         // back above; what stays is an idle socket and the buffer, and the system reclaims the process
         // if it needs the memory - that return is a cold start, which is the one that works.
         if (!isTvBox) {
@@ -3378,8 +3374,10 @@ public class PlayerActivity extends Activity {
                 }
                 apiSegments = bundle.getString(API_SEGMENTS);
                 apiHeaders = bundle.getStringArray(API_HEADERS);
-                apiSeason = bundle.getInt(API_SEASON, -1);
-                apiEpisode = bundle.getInt(API_EPISODE, -1);
+                // Some launchers send the numbers as strings, which getInt() drops for -1: the episode
+                // is then looked up as a film.
+                apiSeason = getIntOrStringExtra(bundle, API_SEASON);
+                apiEpisode = getIntOrStringExtra(bundle, API_EPISODE);
                 apiImdbId = bundle.getString(API_IMDB_ID);
                 apiTmdbId = getStringOrIntExtra(bundle, API_ID);
                 // Quality variants for a single (non-playlist) video; playlists carry per-episode maps.
@@ -3492,10 +3490,12 @@ public class PlayerActivity extends Activity {
                 if (keyCode == KeyEvent.KEYCODE_MEDIA_PAUSE) {
                     pauseByUser();
                 } else if (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY) {
+                    prepareIfIdle();
                     player.play();
                 } else if (player.isPlaying()) {
                     pauseByUser();
                 } else {
+                    prepareIfIdle();
                     player.play();
                 }
                 return true;
@@ -3515,6 +3515,7 @@ public class PlayerActivity extends Activity {
                     if (player.isPlaying()) {
                         pauseByUser();
                     } else {
+                        prepareIfIdle();
                         player.play();
                     }
                     return true;
@@ -4152,6 +4153,7 @@ public class PlayerActivity extends Activity {
         apiMediaItems.clear();
         apiPlaylistSegments.clear();
         apiPlaylistStartIndex = 0;
+        apiExtrasIndex = 0;
         apiPlaylistPositions = null;
         resolvedMediaTypes.clear();
         apiSeason = -1;
@@ -4194,9 +4196,15 @@ public class PlayerActivity extends Activity {
         // while a film picked afresh starts from the settings again.
         skipOffsetSec = 0;
         skipModeSession = null;
+        dynamicRangeSession = null;
+        centreBoostSession = null;
+        applySoundSession();
         skipSeenThisSession = false;
         if (skipOffsetDialog != null && skipOffsetDialog.isShowing()) {
             skipOffsetDialog.dismiss();
+        }
+        if (soundDialog != null && soundDialog.isShowing()) {
+            soundDialog.dismiss();
         }
         // Same for the subtitle offset: it was tuned against one file's timing and means nothing to the next.
         applySubtitleOffset(0);
@@ -4459,18 +4467,28 @@ public class PlayerActivity extends Activity {
         // Intent segments win outright; anything else this lookup may already have found is its own
         // earlier, less certain result and is meant to be replaced.
         if (!mPrefs.skipEnabled || !mPrefs.skipFetchOnline || skipSourceFromIntent) {
+            Utils.log("segments: not searching, " + (skipSourceFromIntent ? "the launcher sent them"
+                    : !mPrefs.skipEnabled ? "skipping is off" : "online search is off"));
             return;
         }
         final int index = player.getCurrentMediaItemIndex();
         final MediaId id = mediaIdAt(index);
         if (id.isEmpty()) {
+            Utils.log("segments: no title id, not searching");
             return;
         }
         cancelSegmentFinder();
         final int generation = segmentFetchGeneration;
         segmentFinderThread = SegmentFinder.find(id.imdb, id.tmdb, id.season, id.episode,
                 currentDurationSec(),
-                segments -> runOnUiThread(() -> onSegmentsFetched(generation, index, segments)));
+                segments -> runOnUiThread(() -> {
+                    // On the main thread a throw ends the app; a skip that cannot be applied is only logged.
+                    try {
+                        onSegmentsFetched(generation, index, segments);
+                    } catch (RuntimeException e) {
+                        Utils.log("segments: applying failed " + e);
+                    }
+                }));
         prefetchNextSegments();
     }
 
@@ -4546,8 +4564,11 @@ public class PlayerActivity extends Activity {
         final String imdb = manualTmdbId != null ? null : stringAt(apiPlaylistImdbIds, index, apiImdbId);
         final String tmdb = manualTmdbId != null
                 ? manualTmdbId : stringAt(apiPlaylistTmdbIds, index, apiTmdbId);
-        int season = valueAt(apiPlaylistSeasons, index, apiSeason);
-        int episode = valueAt(apiPlaylistEpisodes, index, apiEpisode);
+        // The single-item season/episode belong to the item the launch opened, not to its neighbours:
+        // lent to them, the next episode is looked up as this one and the name below is never read.
+        final boolean described = index == apiExtrasIndex;
+        int season = valueAt(apiPlaylistSeasons, index, described ? apiSeason : -1);
+        int episode = valueAt(apiPlaylistEpisodes, index, described ? apiEpisode : -1);
         // Last resort, and for at least one launcher the only one that works: LAMPA sends every
         // per-episode field as an empty string and writes the numbers into the item's name instead.
         // Without them a series is looked up as a film, which is not just a worse match but a
@@ -5421,6 +5442,7 @@ public class PlayerActivity extends Activity {
         apiPlaylistTmdbIds.clear();
         apiPlaylistQuality.clear();
         apiPlaylistStartIndex = 0;
+        apiExtrasIndex = 0;
 
         for (int i = 0; i < size; i++) {
             Uri uri = null;
@@ -5458,6 +5480,7 @@ public class PlayerActivity extends Activity {
 
             if (dataUri != null && uri.equals(dataUri)) {
                 apiPlaylistStartIndex = apiMediaItems.size();
+                apiExtrasIndex = apiPlaylistStartIndex;
             }
             final MediaItem.Builder itemBuilder = new MediaItem.Builder()
                     .setUri(uri)
@@ -5583,6 +5606,16 @@ public class PlayerActivity extends Activity {
         }
         final String s = String.valueOf(value).trim();
         return s.isEmpty() ? null : s;
+    }
+
+    /** An int extra sent as any number or numeric string; -1 when absent or not a number. */
+    private static int getIntOrStringExtra(Bundle bundle, String key) {
+        final String s = getStringOrIntExtra(bundle, key);
+        try {
+            return s == null ? -1 : (int) Double.parseDouble(s);
+        } catch (NumberFormatException e) {
+            return -1;
+        }
     }
 
     private static Integer parseIntOrNull(String[] array, int i) {
@@ -7255,6 +7288,13 @@ public class PlayerActivity extends Activity {
         TrackSelectionParameters.Builder builder = player.getTrackSelectionParameters().buildUpon()
                 .clearOverridesOfType(C.TRACK_TYPE_VIDEO)
                 .setForceHighestSupportedBitrate(choice.mode == VideoQualityChoice.MODE_MAXIMUM);
+        // The default viewport caps even the forced pick at the screen: a 2412x1080 phone stopped at
+        // 1440p on a 4K stream its decoder plays. Maximum means what the decoder takes, Auto the screen.
+        if (choice.mode == VideoQualityChoice.MODE_MAXIMUM) {
+            builder.clearViewportSizeConstraints();
+        } else {
+            builder.setViewportSizeToPhysicalDisplaySize(this, true);
+        }
         if (choice.mode == VideoQualityChoice.MODE_TRACK && choice.group != null) {
             builder.setOverrideForType(new TrackSelectionOverride(
                     choice.group, Collections.singletonList(choice.trackIndex)));
@@ -10287,12 +10327,12 @@ public class PlayerActivity extends Activity {
         return stepSpeedBy(faster ? SPEED_KEY_STEP : -SPEED_KEY_STEP);
     }
 
-    private void cycleOrientation() {
-        mPrefs.orientation = Utils.getNextOrientation(mPrefs.orientation);
-        Utils.setOrientation(PlayerActivity.this, mPrefs.orientation);
-        updateButtonRotation();
-        Dialogs.showText(playerView, getString(mPrefs.orientation.description),
-                R.drawable.ic_screen_rotation_24dp, 2500);
+    // Turns the screen to the other side and keeps the sensor for upside down. Not remembered: the
+    // orientation setting takes over again with the next video.
+    private void rotateScreen() {
+        setRequestedOrientation(getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE
+                ? ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+                : ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
         resetHideCallbacks();
     }
 
@@ -10479,6 +10519,67 @@ public class PlayerActivity extends Activity {
         showPickerDialog(sleepTimerDialog);
     }
 
+    private boolean dynamicRangeOn() {
+        return dynamicRangeSession != null ? dynamicRangeSession : mPrefs.dynamicRange;
+    }
+
+    private boolean centreBoostOn() {
+        return centreBoostSession != null ? centreBoostSession : mPrefs.centreBoost;
+    }
+
+    /** Hands the session's answer to the processors, which take it on the next buffer. */
+    private void applySoundSession() {
+        if (dynamicRangeProcessor != null) {
+            dynamicRangeProcessor.setEnabled(dynamicRangeOn());
+        }
+        if (boostProcessor != null) {
+            boostProcessor.setCentreBoost(centreBoostOn());
+        }
+    }
+
+    /** What is on, in the words of the panel; null when both are off, like any row at rest. */
+    private String soundSummary() {
+        final List<String> on = new ArrayList<>();
+        if (dynamicRangeOn()) {
+            on.add(getString(R.string.sound_summary_dynamic_range));
+        }
+        if (centreBoostOn()) {
+            on.add(getString(R.string.sound_summary_centre_boost));
+        }
+        return on.isEmpty() ? null : TextUtils.join(" · ", on);
+    }
+
+    private OffsetPanel.Toggle soundToggle(final int title, final int summaryOn, final int summaryOff,
+                                           final boolean on, final boolean settings,
+                                           final OffsetPanel.Toggle.Picked picked) {
+        return new OffsetPanel.Toggle(getString(title), getString(summaryOn), getString(summaryOff),
+                on, settings, picked);
+    }
+
+    /**
+     * The two switches of the settings screen's audio section, for this session only: reached from
+     * the film, forgotten with it. The settings stay where the lasting answer is given.
+     */
+    private void showSoundPanel() {
+        if (soundDialog != null) {
+            soundDialog.dismiss();
+        }
+        soundDialog = OffsetPanel.create(this, ui, getString(R.string.sound_session_title),
+                soundToggle(R.string.pref_dynamic_range, R.string.pref_dynamic_range_on,
+                        R.string.pref_dynamic_range_off, dynamicRangeOn(), mPrefs.dynamicRange,
+                        value -> {
+                            dynamicRangeSession = value;
+                            applySoundSession();
+                        }),
+                soundToggle(R.string.pref_centre_boost, R.string.pref_centre_boost_on,
+                        R.string.pref_centre_boost_off, centreBoostOn(), mPrefs.centreBoost,
+                        value -> {
+                            centreBoostSession = value;
+                            applySoundSession();
+                        }));
+        showPickerDialog(soundDialog);
+    }
+
     /**
      * Overflow menu: everything used rarely or once per session, so the control row stays calm.
      *
@@ -10502,6 +10603,8 @@ public class PlayerActivity extends Activity {
                     // and "Normal" is the absence of a change.
                     userSpeed() == 1f ? null : SpeedPanel.format(userSpeed()),
                     false, this::showSpeedDialog));
+            items.add(new Dialogs.MenuItem(R.drawable.ic_volume_up_24dp, getString(R.string.sound_row),
+                    soundSummary(), false, this::showSoundPanel));
         }
         // Only with subtitles on: there is nothing to shift otherwise. One row for both lines — the
         // panel behind it carries a slider each, and which is which is answered there.
@@ -11445,6 +11548,38 @@ public class PlayerActivity extends Activity {
         return mimeType.substring(mimeType.lastIndexOf('/') + 1).toUpperCase(Locale.US);
     }
 
+    // Auto weighs a rendition by its AVERAGE-BANDWIDTH where the playlist gives one, not by the peak
+    // Format.bitrate prefers. One CDN declares peaks 4-6x the real rate (4K: 18.9 Mbit/s peak,
+    // 2.9 average, 4.2 measured), which held a phone with a 10+ Mbit/s link at 480p. The buffer absorbs
+    // a real peak; the selector still steps down when it drains.
+    private static final class AverageBitrateTrackSelection extends AdaptiveTrackSelection {
+        AverageBitrateTrackSelection(TrackGroup group, int[] tracks, int type, BandwidthMeter meter,
+                                     List<AdaptationCheckpoint> checkpoints) {
+            super(group, tracks, type, meter,
+                    DEFAULT_MIN_DURATION_FOR_QUALITY_INCREASE_MS,
+                    DEFAULT_MAX_DURATION_FOR_QUALITY_DECREASE_MS,
+                    DEFAULT_MIN_DURATION_TO_RETAIN_AFTER_DISCARD_MS,
+                    DEFAULT_MAX_WIDTH_TO_DISCARD, DEFAULT_MAX_HEIGHT_TO_DISCARD,
+                    DEFAULT_BANDWIDTH_FRACTION,
+                    DEFAULT_BUFFERED_FRACTION_TO_LIVE_EDGE_FOR_QUALITY_INCREASE,
+                    checkpoints, Clock.DEFAULT);
+        }
+
+        @Override
+        protected boolean canSelectFormat(Format format, int trackBitrate, long effectiveBitrate) {
+            return super.canSelectFormat(format, format.averageBitrate != Format.NO_VALUE
+                    ? format.averageBitrate : trackBitrate, effectiveBitrate);
+        }
+
+        static final class Factory extends AdaptiveTrackSelection.Factory {
+            @Override
+            protected AdaptiveTrackSelection createAdaptiveTrackSelection(TrackGroup group, int[] tracks,
+                    int type, BandwidthMeter meter, ImmutableList<AdaptationCheckpoint> checkpoints) {
+                return new AverageBitrateTrackSelection(group, tracks, type, meter, checkpoints);
+            }
+        }
+    }
+
     private static final class VideoQualityChoice {
         static final int MODE_AUTO = 0;
         static final int MODE_MAXIMUM = 1;
@@ -11739,10 +11874,8 @@ public class PlayerActivity extends Activity {
         // Only the transition it was set for may read it. A skip that never produced one would otherwise
         // leave it behind, and the next episode the viewer picked by hand would pass for an automatic step.
         steppedBySkip = false;
-        if (skipMediaAfterFatalError) {
-            skipMediaAfterFatalError = false;
-            haveMedia = false;
-        }
+        final boolean holdIdle = haveMedia && mPrefs.mediaUri.equals(heldAfterError);
+        heldAfterError = null;
 
         // A reinitialisation that must not auto-play — a SOURCE quality switch, or a rebuild triggered by
         // returning to the foreground; otherwise apiAccess or a zero position would force it. Consumed here
@@ -11832,9 +11965,10 @@ public class PlayerActivity extends Activity {
             player = null;
             audioSink = null;
             boostProcessor = null;
+            dynamicRangeProcessor = null;
         }
 
-        trackSelector = new DefaultTrackSelector(this);
+        trackSelector = new DefaultTrackSelector(this, new AverageBitrateTrackSelection.Factory());
         trackSelector.setParameters(trackSelector.buildUponParameters()
                 .setAllowInvalidateSelectionsOnRendererCapabilitiesChange(true));
         if (mPrefs.tunneling) {
@@ -12146,7 +12280,7 @@ public class PlayerActivity extends Activity {
                 // fixed once the sink exists, so a track that needs it later must not find it absent.
                 final DownmixAudioProcessor downmix =
                         new DownmixAudioProcessor(mPrefs.downmixNarrowRoute, routePcmChannels);
-                boostProcessor.setCentreBoost(mPrefs.centreBoost, routeChannels);
+                boostProcessor.setCentreBoost(centreBoostOn(), routeChannels);
                 final boolean forceCapabilities = mPrefs.audioPassthrough && mPrefs.audioPassthroughForce;
                 // Declared capabilities are only honoured by a builder holding no context: given one,
                 // the output provider registers a receiver for the route's own answer and overwrites
@@ -12175,10 +12309,10 @@ public class PlayerActivity extends Activity {
                         // phone's, and the heavy shape belongs there; the gentle one goes where there
                         // are speakers worth keeping a mix for. The fold comes first of all, so both
                         // of them see the two channels that will actually leave the box.
-                        .setAudioProcessors(mPrefs.dynamicRange
-                                ? new AudioProcessor[]{downmix, boostProcessor,
-                                        new DynamicRangeProcessor(routeChannels <= 2)}
-                                : new AudioProcessor[]{downmix, boostProcessor});
+                        // Always in the chain, bypassed while off: the session switches it mid-film.
+                        .setAudioProcessors(new AudioProcessor[]{downmix, boostProcessor,
+                                dynamicRangeProcessor = new DynamicRangeProcessor(routeChannels <= 2,
+                                        dynamicRangeOn())});
                 AudioSink sink = builder.build();
                 // The mode this session opens in, decided here rather than by a reselect on the first
                 // frame: a remembered rate other than 1x means there is no bitstream to hand over, and
@@ -12334,11 +12468,19 @@ public class PlayerActivity extends Activity {
             // playlist whose UTF-8 body is 4910 bytes long, having counted characters rather than bytes.
             // Media3 believes Content-Range, so the playlist arrived cut mid-line and every variant was
             // lost with it. Without the header the same server answers 200 and streams all of it.
+            // A proxy does it too: api.framextv.tech rewrites every link in the playlist it forwards and
+            // passes on the origin's "bytes 0-4172/4173" for a body of 140818, so an episode arrived as
+            // its first 106 seconds with no end tag, and played as a live broadcast.
+            //
+            // Known by the load rather than by the URL, which is exactly what does not say: a proxy's
+            // address is /api/proxy?url=… whatever it carries. Media3 allows gzip on every load it reads
+            // whole — the HLS, DASH and SmoothStreaming manifests, HLS keys, sideloaded subtitles — and on
+            // no media load: progressive reads and HLS/DASH segments keep the seed.
             final androidx.media3.datasource.DataSource.Factory rangeSeeded =
                     new androidx.media3.datasource.ResolvingDataSource.Factory(
                             new DefaultDataSource.Factory(this, httpDataSourceFactory),
                             dataSpec -> dataSpec.position == 0 && dataSpec.length == C.LENGTH_UNSET
-                                    && Util.inferContentType(dataSpec.uri) == C.CONTENT_TYPE_OTHER
+                                    && !dataSpec.isFlagSet(androidx.media3.datasource.DataSpec.FLAG_ALLOW_GZIP)
                                     ? dataSpec.withAdditionalHeaders(
                                             Collections.singletonMap("Range", "bytes=0-"))
                                     : dataSpec);
@@ -12617,14 +12759,15 @@ public class PlayerActivity extends Activity {
             // spend the held play before the display has settled.
             modeMatchPending = false;
 
-            updateLoading(true);
+            // Not for a held failure: nothing is loading, and hiding play would push the remote off it.
+            updateLoading(!holdIdle);
 
             // Opening a film plays it, wherever it starts from: a remembered position says where to pick
             // the film up, not that the viewer wants to look at a still. Only a session being rebuilt
             // under the viewer comes back the way they left it, and every such path says so - keepPaused
             // for the rebuilds inside one activity, pauseAfterScreenRestart for the one that throws the
             // activity away.
-            if (!keepPaused && !pauseAfterScreenRestart) {
+            if (!keepPaused && !pauseAfterScreenRestart && !holdIdle) {
                 play = true;
             }
             pauseAfterScreenRestart = false;
@@ -12686,12 +12829,23 @@ public class PlayerActivity extends Activity {
 
         player.addListener(playerListener);
         player.addAnalyticsListener(playbackInfoListener);
+        // The item set above made its transition before the listener was there to trace it.
+        final Uri startUri = currentMediaUri();
+        if (startUri != null) {
+            Utils.log("media=" + Utils.reportUri(startUri, mPrefs.maskReports));
+        }
         // The renderers factory has just loaded the extension libraries it needs, so this is free here.
         if (ffmpegAvailable == null
                 && mPrefs.decoderPriority != DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF) {
             ffmpegAvailable = FfmpegLibrary.isAvailable();
         }
-        player.prepare();
+        if (holdIdle) {
+            // Idle with the timeline set, as a stopped load leaves it: the play button re-prepares this
+            // item (handlePlayButtonAction) and the arrows step out of it (stepEpisodeWhileIdle).
+            setEpisodeNavLoading(false);
+        } else {
+            player.prepare();
+        }
         liveWatchStartMs = SystemClock.elapsedRealtime();
 
         // The second line is view-scoped and survives this rebuild. A track of the media cannot be
@@ -12912,7 +13066,6 @@ public class PlayerActivity extends Activity {
         mPrefs.updateVolume(Math.round(playerVolume));
         if (player != null) {
             mPrefs.updateBrightness(Math.round(mBrightnessControl.percent));
-            mPrefs.updateOrientation();
 
             if (haveMedia) {
                 // Prevent overwriting temporarily inaccessible media position
@@ -12928,18 +13081,22 @@ public class PlayerActivity extends Activity {
                     mPrefs.updatePosition(position);
                     rememberEpisodePosition(player.getCurrentMediaItemIndex(), position);
                 }
-                mPrefs.updateMeta(getSelectedTrack(C.TRACK_TYPE_AUDIO),
-                        // A painted subtitle is on screen with no track selected, so getSelectedTrack
-                        // answers "#none" — which reads back as "the viewer chose off" and disables the
-                        // very track the next rebuild restores from mPrefs.subtitleUri. Null means no
-                        // choice recorded, letting that track's DEFAULT flag select it as a fresh open does.
-                        paintedSubtitleUri != null ? null : getSelectedTrack(C.TRACK_TYPE_TEXT),
-                        playerView.getResizeMode(),
-                        playerView.getVideoSurfaceView().getScaleX(),
-                        currentAspectRatio,
-                        // The viewer's speed, not the one a room may be nudging to close a gap —
-                        // otherwise leaving mid-correction remembers 1.05× as a preference.
-                        userSpeed());
+                // Not from a player that has no tracks yet (one held after an error, never prepared):
+                // getSelectedTrack would answer "#none" and switch the subtitles off for the retry.
+                if (!player.getCurrentTracks().isEmpty()) {
+                    mPrefs.updateMeta(getSelectedTrack(C.TRACK_TYPE_AUDIO),
+                            // A painted subtitle is on screen with no track selected, so getSelectedTrack
+                            // answers "#none" — which reads back as "the viewer chose off" and disables the
+                            // very track the next rebuild restores from mPrefs.subtitleUri. Null means no
+                            // choice recorded, letting that track's DEFAULT flag select it as a fresh open does.
+                            paintedSubtitleUri != null ? null : getSelectedTrack(C.TRACK_TYPE_TEXT),
+                            playerView.getResizeMode(),
+                            playerView.getVideoSurfaceView().getScaleX(),
+                            currentAspectRatio,
+                            // The viewer's speed, not the one a room may be nudging to close a gap —
+                            // otherwise leaving mid-correction remembers 1.05× as a preference.
+                            userSpeed());
+                }
             }
         }
     }
@@ -13126,7 +13283,7 @@ public class PlayerActivity extends Activity {
         }
         // A stuck load on a TV box must not be answered with stop(): that releases the video decoder, and
         // a Realtek 4K Dolby Vision decoder does not come back — the resume prepare() fails for good with
-        // 0x80001000, the same death pauseReleaseRunnable was taught to avoid. The load is stuck, the
+        // 0x80001000. The load is stuck, the
         // decoder is not, so leave it be: hold the player on the position it already has and let a seek
         // back into buffered data, or the source finally answering the right range, resume on that same
         // decoder. The spinner stays (its rate readout still reads 0), the episode arrows come back, and
@@ -13137,7 +13294,7 @@ public class PlayerActivity extends Activity {
                     + ", TV box, holding the decoder");
             reportOutcome("load-stalled-held", null);
             setEpisodeNavLoading(false);
-            showSnack(getString(R.string.error_playback_stalled), null);
+            stallDialog = showSnack(getString(R.string.error_playback_stalled), null);
             return;
         }
         Utils.log("watchdog: +" + progressed + " B, loading=" + player.isLoading() + ", stopping");
@@ -13187,8 +13344,6 @@ public class PlayerActivity extends Activity {
             playerView.removeCallbacks(passthroughRestartRunnable);
             playerView.removeCallbacks(reselectWedgeRunnable);
             playerView.removeCallbacks(rebufferArmRunnable);
-            playerView.removeCallbacks(pauseReleaseRunnable);
-            stoppedForPause = false;
             audioReleasedForBackground = false;
             audioRestartPending = false;
             audioRestartInFlight = false;
@@ -13231,6 +13386,7 @@ public class PlayerActivity extends Activity {
             player = null;
             audioSink = null;
             boostProcessor = null;
+            dynamicRangeProcessor = null;
         }
         stopSkipPolling();
         cancelSegmentFinder();
@@ -13277,6 +13433,10 @@ public class PlayerActivity extends Activity {
         if (subtitleOffsetDialog != null) {
             subtitleOffsetDialog.dismiss();
             subtitleOffsetDialog = null;
+        }
+        if (soundDialog != null) {
+            soundDialog.dismiss();
+            soundDialog = null;
         }
         // Only the panel goes: this runs on a quality switch too, and an armed timer has to ride across that.
         if (sleepTimerDialog != null) {
@@ -13462,8 +13622,11 @@ public class PlayerActivity extends Activity {
 
         @Override
         public void onMediaItemTransition(MediaItem mediaItem, int reason) {
+            // The link rides the trace so the app log names the file too, masked as the setting says.
             Utils.log("item transition reason=" + reason
-                    + (player != null ? " index=" + player.getCurrentMediaItemIndex() : ""));
+                    + (player != null ? " index=" + player.getCurrentMediaItemIndex() : "")
+                    + (mediaItem != null && mediaItem.localConfiguration != null
+                    ? " media=" + Utils.reportUri(mediaItem.localConfiguration.uri, mPrefs.maskReports) : ""));
             // The mode for a new item is asked for once its format is readable, in onVideoSizeChanged.
             // Not for the file a session opens with — the loading branch does that one — and not for a
             // list that changed under the item already playing, which is the same picture as before.
@@ -13642,19 +13805,6 @@ public class PlayerActivity extends Activity {
         // by the sink no longer reporting passthrough.
         @Override
         public void onPlayWhenReadyChanged(boolean playWhenReady, int reason) {
-            if (playWhenReady && stoppedForPause) {
-                stoppedForPause = false;
-                // The re-prepare opens a fresh output of its own, so the pause's latch has nothing left to
-                // recreate — spent here it would tear that output down the instant playback begins, which is
-                // the shape that has produced a silent start before (see audioEverStarted). Outside the check
-                // below: the play button has usually re-prepared already (Util.handlePlayButtonAction does so
-                // on an idle player before it calls play()), so the state here is rarely still IDLE.
-                audioRestartPending = false;
-                if (player != null && player.getPlaybackState() == Player.STATE_IDLE) {
-                    Utils.log("pause: re-preparing after the source was let go");
-                    player.prepare();
-                }
-            }
             if (playWhenReady) {
                 return;
             }
@@ -13695,6 +13845,12 @@ public class PlayerActivity extends Activity {
                 if (audioModePending && !audioRestartInFlight && audioSink != null) {
                     reselectAudioTrackForMode();
                 }
+                // The held stall came back by itself (see reportVideoLoadTimeout): its message is stale.
+                if (stallDialog != null) {
+                    stallDialog.dismiss();
+                    stallDialog = null;
+                    reportOutcome("load-stalled-recovered", null);
+                }
                 // Fresh baseline for the freeze watchdog: nothing is output while paused, and whatever
                 // the last window measured belongs to a playback that has since stopped.
                 frameOutputSeen = -1;
@@ -13721,13 +13877,6 @@ public class PlayerActivity extends Activity {
                 playerView.postDelayed(rebufferArmRunnable, REBUFFER_ARM_MS);
             }
             resetDim();
-
-            // A pause by the viewer, not a stall: playWhenReady is what separates them, and only the
-            // first should start the clock on letting the source go.
-            playerView.removeCallbacks(pauseReleaseRunnable);
-            if (!isPlaying && player != null && !player.getPlayWhenReady()) {
-                playerView.postDelayed(pauseReleaseRunnable, PAUSE_RELEASE_MS);
-            }
 
             if (Utils.isPiPSupported(PlayerActivity.this)) {
                 if (isPlaying) {
@@ -13796,6 +13945,8 @@ public class PlayerActivity extends Activity {
                 resolverNotReadyUri = null;
                 // Playing again, so the screen has earned another restart if it ever needs one.
                 screenRestartUsed = false;
+                // A retry the viewer made from a held failure worked, so there is nothing left to hold.
+                heldAfterError = null;
                 // Playback that only got here by spending a recovery budget is worth one line: without it a
                 // stall that resolved after twenty seconds of re-reads leaves no trace anywhere.
                 if (decoderRetries > 0 || sourceRetries > 0 || videoFreezeRecoveries > 0) {
@@ -13835,16 +13986,16 @@ public class PlayerActivity extends Activity {
                 }
 
                 updateMediaInfo();
+                final MediaItem current = player.getCurrentMediaItem();
+                if (current != null && current.localConfiguration != null) {
+                    Prefs.rememberLength(PlayerActivity.this, current.localConfiguration.uri,
+                            player.getDuration());
+                }
 
                 matchDisplayModeForNewItem();
 
                 if (videoLoading) {
                     videoLoading = false;
-
-                    if (mPrefs.orientation == Utils.Orientation.UNSPECIFIED) {
-                        mPrefs.orientation = Utils.getNextOrientation(mPrefs.orientation);
-                        Utils.setOrientation(PlayerActivity.this, mPrefs.orientation);
-                    }
 
                     final Format format = player.getVideoFormat();
 
@@ -13855,7 +14006,6 @@ public class PlayerActivity extends Activity {
                             } else {
                                 PlayerActivity.this.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
                             }
-                            updateButtonRotation();
                         }
 
                         updateSubtitleLayout();
@@ -13903,9 +14053,8 @@ public class PlayerActivity extends Activity {
                 armLoadWatchdog();
             // Only real media can end. initializePlayer prepares unconditionally, and a prepare with no
             // media items reports STATE_ENDED at once, so the empty state — a launcher start with nothing
-            // to resume, the fallback after a fatal error, a deleted file — would otherwise count as a
-            // video watched to its end and report that to the launcher. Same guard as on the end controls
-            // above.
+            // to resume, a deleted file — would otherwise count as a video watched to its end and report
+            // that to the launcher. Same guard as on the end controls above.
             } else if (state == Player.STATE_ENDED && haveMedia) {
                 cancelLoadWatchdog();
                 playbackFinished = true;
@@ -14097,39 +14246,20 @@ public class PlayerActivity extends Activity {
                             ((ExoPlaybackException) error).rendererFormat)) {
                 return;
             }
-            // The remembered clip can no longer be opened: a foreign app's one-off URI grant has
-            // expired (a video streamed from a messenger, reopened after that app restarted) or the
-            // file is gone. Expected external state, not an app bug — forget the clip so it stops
-            // failing on every launch, fall back to the empty state, and report nothing.
-            // Forgetting also breaks the loop where closing the error screen resumes the activity,
-            // onStart re-prepares the same dead URI and the error screen comes straight back, which
-            // reads as a window that cannot be dismissed. For an API session (persistentMode off)
-            // updateMedia only drops the in-memory URI, so nothing remembered in prefs is lost.
+            // The clip can no longer be opened: a foreign app's one-off URI grant has expired (a video
+            // streamed from a messenger, reopened after that app restarted) or the file is gone. Expected
+            // external state, not an app bug, so a notice rather than a report. The player stays where it
+            // is, as after any error — closing it is the viewer's call. A playlist keeps everything with
+            // it: the other episodes are still watchable, and nothing walks the list on its own, which
+            // would march past every episode with a message each time (a modal dialog each time on TV)
+            // and lose the viewer's place. The arrows are re-enabled: they are gated while loading and
+            // would otherwise only be cleared by STATE_READY or releasePlayer. Held like a reported
+            // failure, so coming back to the screen does not prepare the dead URI again.
             final int unavailable = mediaUnavailableMessage(error);
             if (unavailable != 0) {
                 reportOutcome("media-unavailable", error);
-                // A playlist keeps everything: the other episodes are still watchable, and the user may
-                // want to step back to the one they were on (an accidental switch, say). So never tear the
-                // view down and never walk the list on its own — that would march past every episode with
-                // a message each time (a modal dialog each time on TV) and lose the user's place. Stay on
-                // this episode and re-enable the arrows, which are gated while loading and would otherwise
-                // only be cleared by STATE_READY or releasePlayer.
-                if (player != null && player.getMediaItemCount() > 1) {
-                    setEpisodeNavLoading(false);
-                    showSnack(getString(unavailable), null);
-                    return;
-                }
-                releasePlayer(false);
-                // Forget the clip only when nothing entitles us to it any more: a one-off grant from
-                // another app is gone for good, so retrying it on every launch is pointless. A URI we hold
-                // a persisted grant for may just be unreachable right now (cloud provider offline, card
-                // ejected), so keep it and let the next launch try again.
-                if (!holdsPersistedGrant(mPrefs.mediaUri)) {
-                    mPrefs.updateMedia(PlayerActivity.this, null, null);
-                }
-                // Before the notice: showEmptyState() brings the opaque overlay to the front, and the
-                // notice is only added to the content frame afterwards, so it stays on top.
-                backToShell();
+                heldAfterError = mPrefs.mediaUri;
+                setEpisodeNavLoading(false);
                 showSnack(getString(unavailable), null);
                 return;
             }
@@ -15114,9 +15244,15 @@ public class PlayerActivity extends Activity {
      * 3840x2160 at 60 fps file got. Of course it is: turned on its side it is the same macroblock count
      * at the same rate. The table talks about geometry and the driver counts work, and what the driver
      * counts is what refuses. So both get asked plainly.
+     *
+     * <p>Never on a TV box. The table was believed here for a phone's Qualcomm decoder, and a TV's
+     * Dolby Vision decoder can publish one that undersells it - Dolby Vision on a TV was reported to
+     * play before 2.0.1, which brought this, and to fail after it. A TV keeps the configuration Media3
+     * builds, as it did then; a codec that really refuses it still gets the plain one, through
+     * sessionPlainCodecFormats, which only a refusal fills.
      */
     private static boolean deviceSaysNo(final int verdict) {
-        return verdict == HW_RATE_SHORT || verdict == HW_NO_SIZE;
+        return !isTvBox && (verdict == HW_RATE_SHORT || verdict == HW_NO_SIZE);
     }
 
     private static String verdictName(final int verdict) {
@@ -15906,8 +16042,6 @@ public class PlayerActivity extends Activity {
 
         updateSubtitleLayout(newConfig.orientation);
 
-        updateButtonRotation();
-
         // Recompute adaptive metrics on resize/fold/rotation (manifest opts out of recreate for these, so
         // playback isn't interrupted). Re-run the inset pass (grid/overscan) and drop any open picker — it was
         // sized for the old width/orientation and is rebuilt fresh on next open. Density/fontScale changes are
@@ -15924,7 +16058,7 @@ public class PlayerActivity extends Activity {
 
     private void dismissOpenPickers() {
         final android.app.Dialog[] pickers = { qualityDialog, playlistDialog, skipOffsetDialog,
-                subtitleOffsetDialog, sleepTimerDialog, Dialogs.openMenu() };
+                subtitleOffsetDialog, soundDialog, sleepTimerDialog, Dialogs.openMenu() };
         for (final android.app.Dialog d : pickers) {
             if (d != null && d.isShowing()) {
                 d.dismiss();
@@ -15955,19 +16089,6 @@ public class PlayerActivity extends Activity {
         showErrorScreen(errorSummary(error), errorReport(error),
                 error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED
                         ? softwareVideoMessage(error.rendererFormat) : null);
-    }
-
-    // Whether a SAF grant we took ourselves still covers this uri, i.e. it is ours to retry later.
-    private boolean holdsPersistedGrant(final Uri uri) {
-        if (uri == null) {
-            return false;
-        }
-        for (final UriPermission permission : getContentResolver().getPersistedUriPermissions()) {
-            if (permission.getUri().equals(uri)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     // The message for a clip that can no longer be opened, or 0 when this is a different failure.
@@ -16094,8 +16215,8 @@ public class PlayerActivity extends Activity {
             sb.append('\n').append(message);
         }
         final Uri uri = currentMediaUri();
-        if (Utils.isSupportedNetworkUri(uri)) {
-            sb.append("\n\n").append(Utils.uriToReportString(uri));
+        if (Utils.isSupportedNetworkUri(uri) || (uri != null && !mPrefs.maskReports)) {
+            sb.append("\n\n").append(Utils.reportUri(uri, mPrefs.maskReports));
         }
         return sb.toString();
     }
@@ -16105,12 +16226,8 @@ public class PlayerActivity extends Activity {
     private String errorReport(PlaybackException error) {
         final StringBuilder sb = new StringBuilder("Error code: ").append(error.getErrorCodeName());
         final Uri uri = currentMediaUri();
-        if (Utils.isSupportedNetworkUri(uri)) {
-            sb.append("\nMedia: ").append(Utils.uriToReportString(uri));
-        } else if (uri != null) {
-            // Local media: the scheme only. A path or file name can identify the user's library, so it
-            // never leaves the device — the formats below say everything a decoder bug needs anyway.
-            sb.append("\nMedia: ").append(uri.getScheme()).append(" (local)");
+        if (uri != null) {
+            sb.append("\nMedia: ").append(Utils.reportUri(uri, mPrefs.maskReports));
         }
         final String codec = codecDetails(error);
         if (!codec.isEmpty()) {
@@ -16241,8 +16358,8 @@ public class PlayerActivity extends Activity {
                 .append(mPrefs.mapDV7ToHevc ? ", map DV7" : "")
                 .append(mPrefs.refuseDolbyVision ? ", no DV" : "")
                 .append(mPrefs.removeHdr10Plus ? ", no HDR10+ under DV" : "")
-                .append(mPrefs.centreBoost ? ", dialogue lift" : "")
-                .append(mPrefs.dynamicRange ? ", night mode" : "");
+                .append(centreBoostOn() ? ", dialogue lift" : "")
+                .append(dynamicRangeOn() ? ", night mode" : "");
         // What the recovery ladder had already spent, and where the passthrough restart stood: a decoder
         // that failed right after a reselect and one that failed on its own are the two suspects a report
         // from a TV box has to tell apart.
@@ -16422,7 +16539,8 @@ public class PlayerActivity extends Activity {
         }
     }
 
-    void showSnack(final String textPrimary, final String textSecondary) {
+    /** Returns the dialog on TV, which stays until dismissed; null elsewhere, where the snack times out. */
+    AlertDialog showSnack(final String textPrimary, final String textSecondary) {
         final Context dialogContext = Dialogs.dialogContext(this);
         // On TV the Snackbar action button is not reachable with the D-pad, so the "Details" affordance
         // would be lost. Present the error as an AlertDialog instead — its buttons are D-pad focusable.
@@ -16433,13 +16551,12 @@ public class PlayerActivity extends Activity {
             if (textSecondary != null) {
                 builder.setNeutralButton(R.string.error_details, (dialogInterface, i) -> showErrorScreen(textSecondary, textSecondary));
             }
-            builder.show();
-            return;
+            return builder.show();
         }
         clearReadout();
         snackbar = Notice.make(this, textPrimary, true, R.drawable.ic_info_24dp);
         if (snackbar == null) {
-            return;
+            return null;
         }
         if (textSecondary != null) {
             snackbar.setAction(R.string.error_details, v -> showErrorScreen(textSecondary, textSecondary));
@@ -16450,6 +16567,7 @@ public class PlayerActivity extends Activity {
             snackbar.setActionTextColor(brandColor());
         }
         snackbar.show();
+        return null;
     }
 
     private void showErrorScreen(final String summary, final String report) {
@@ -16461,7 +16579,13 @@ public class PlayerActivity extends Activity {
     private void showErrorScreen(final String summary, final String report, final String message) {
         // Every full-screen report from the player passes through here, so this is the one place that has
         // to keep the next resume from walking straight back into the failure (see the field's comment).
-        skipMediaAfterFatalError = true;
+        heldAfterError = mPrefs.mediaUri;
+        // Most callers release the player straight after, and onPause would then find nothing to save:
+        // the clip has to come back where it failed, not where it was last saved. Only the position: the
+        // renderers are down by now, so the tracks would be remembered as none.
+        if (player != null && haveMedia && player.isCurrentMediaItemSeekable()) {
+            mPrefs.updatePosition(player.getCurrentPosition());
+        }
         final Intent intent = new Intent(this, ErrorActivity.class)
                 .putExtra(ErrorActivity.EXTRA_TITLE, getString(R.string.error_report_title))
                 .putExtra(ErrorActivity.EXTRA_SUMMARY, summary)
@@ -17482,34 +17606,6 @@ public class PlayerActivity extends Activity {
             buttonAspectRatio.setImageResource(R.drawable.ic_fit_screen_24dp);
         } else {
             buttonAspectRatio.setImageResource(R.drawable.ic_aspect_ratio_24dp);
-        }
-    }
-
-    private void updateButtonRotation() {
-        boolean portrait = getResources().getConfiguration().orientation == Configuration.ORIENTATION_PORTRAIT;
-        boolean auto = false;
-        try {
-            auto = Settings.System.getInt(getContentResolver(), Settings.System.ACCELEROMETER_ROTATION) == 1;
-        } catch (Settings.SettingNotFoundException e) {
-            e.printStackTrace();
-        }
-
-        if (mPrefs.orientation == Utils.Orientation.VIDEO) {
-            if (auto) {
-                buttonRotation.setImageResource(R.drawable.ic_screen_lock_rotation_24dp);
-            } else if (portrait) {
-                buttonRotation.setImageResource(R.drawable.ic_screen_lock_portrait_24dp);
-            } else {
-                buttonRotation.setImageResource(R.drawable.ic_screen_lock_landscape_24dp);
-            }
-        } else {
-            if (auto) {
-                buttonRotation.setImageResource(R.drawable.ic_screen_rotation_24dp);
-            } else if (portrait) {
-                buttonRotation.setImageResource(R.drawable.ic_screen_portrait_24dp);
-            } else {
-                buttonRotation.setImageResource(R.drawable.ic_screen_landscape_24dp);
-            }
         }
     }
 }

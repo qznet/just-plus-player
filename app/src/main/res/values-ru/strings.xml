@@ -497,6 +497,7 @@
     <string name="browse_place_rename">Переименовать</string>
     <string name="pref_audio_sync">Задержка звука</string>
     <string name="pref_audio_sync_passthrough">Задержка звука при прямой передаче</string>
+    <string name="pref_screen_orientation">Ориентация экрана</string>
     <string name="pref_back_buffer">Держать проигранное для шага назад</string>
     <string name="pref_back_buffer_summary">%s. Держится в памяти для короткой перемотки, около 10 МБ на пять секунд. Не для локальных файлов</string>
     <string name="pref_back_buffer_off">Выключено</string>
@@ -512,6 +513,10 @@
     <string name="pref_centre_boost">Диалоги громче остального</string>
     <string name="pref_centre_boost_on">Речь поднимается над музыкой, возможен перегруз</string>
     <string name="pref_centre_boost_off">Диалоги звучат на том уровне, на котором их свели</string>
+    <string name="sound_row">Звук</string>
+    <string name="sound_session_title">Звук в этом сеансе</string>
+    <string name="sound_summary_dynamic_range">Выровнено</string>
+    <string name="sound_summary_centre_boost">Диалоги громче</string>
     <string name="pref_refuse_dv">Не отдавать Dolby Vision декодеру</string>
     <string name="pref_refuse_dv_on">Играет обычный декодер, цвета могут быть неверны</string>
     <string name="pref_refuse_dv_off">Играет декодер Dolby Vision устройства, если есть</string>
@@ -541,4 +546,10 @@
     <string name="pref_reset_do">Сбросить</string>
     <string name="pref_reset_done">Настройки сброшены</string>
     <string name="pref_together_nick_blank">В имени нужен хотя бы один символ</string>
+    <string name="pref_diagnostics_header">Диагностика</string>
+    <string name="pref_send_app_log">Отправить журнал приложения</string>
+    <string name="pref_send_app_log_summary">Что приложение записало с момента запуска — для отчёта об ошибке</string>
+    <string name="pref_mask_reports">Скрывать ссылки в отчётах</string>
+    <string name="pref_mask_reports_on">Ссылки на видео сокращаются до сервера и пути, локальные файлы — до типа</string>
+    <string name="pref_mask_reports_off">Отчёты содержат полные ссылки на видео вместе с токенами. Загруженный отчёт публичен</string>
 </resources>
