@@ -146,13 +146,11 @@ jobs:
           -Pandroid.injected.signing.key.alias=justplus
           -Pandroid.injected.signing.key.password=${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
 
-      - run: cp app/build/outputs/apk/latestUniversal/release/*.apk JustPlus.Player.apk
-
+      # The build already names its output JustPlus.Player.v<version>.apk, so a copy under a second
+      # name only doubles the download for the same bytes.
       - uses: softprops/action-gh-release@v2
         with:
           body_path: RELEASE_NOTES.md
-          files: |
-            app/build/outputs/apk/latestUniversal/release/*.apk
-            JustPlus.Player.apk
+          files: app/build/outputs/apk/latestUniversal/release/*.apk
           draft: false
           prerelease: false
